@@ -29,7 +29,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, openSync, closeSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -147,12 +147,13 @@ const USER_PATH = /(\/(?:Users|home)\/[A-Za-z0-9._-]+|C:\\Users\\[A-Za-z0-9._-]+
 const PLATFORM_ONLY = /\b(launchctl|plutil|launchd)\b/
 const PLATFORM_GUARD = /darwin|process\.platform/
 const DSH_HOME_USE = /DSH_HOME/
-const DOT_DSH = /\.dsh/
+const DOT_DSH = /\.dsh(?![\w-])/
 
 function auditSources(cwd) {
   const files = ['src', 'helper', 'bin', 'scripts']
     .flatMap((dir) => listSources(path.join(cwd, dir)))
-    .filter((file) => !file.endsWith('.min.js'))
+    // 浏览器半不会 shell out、也不会解析 home：扫它只会造成假阳性
+    .filter((file) => !file.endsWith('.min.js') && !file.includes(`${path.sep}client${path.sep}`))
   const hits = { absolute: [], platform: [], home: [] }
   for (const file of files) {
     const text = readFileSync(file, 'utf8')
@@ -166,8 +167,16 @@ function auditSources(cwd) {
         hits.platform.push(`${relative}:${index + 1}`)
       }
     })
-    // 写 ~/.dsh 却不认 DSH_HOME：搬迁过 home 的机器会写到错的地方
-    if (DOT_DSH.test(text) && !DSH_HOME_USE.test(text)) hits.home.push(relative)
+    // 写 ~/.dsh 却不认 DSH_HOME：搬迁过 home 的机器会写到错的地方。
+    // 只看非注释行，且 `.dsh` 后面不能紧跟词字符（否则 .dshwx-ball 之类会误报）。
+    const homeHit = text
+      .split('\n')
+      .some((line) => {
+        const trimmed = line.trim()
+        if (trimmed.startsWith('*') || trimmed.startsWith('//')) return false
+        return DOT_DSH.test(line)
+      })
+    if (homeHit && !DSH_HOME_USE.test(text)) hits.home.push(relative)
   }
   return { count: files.length, hits }
 }
@@ -194,12 +203,19 @@ let tarball
 let isolatedHome = ''
 let child
 let port = 0
+/** 验证用 profile 名（先声明：cleanup/finish 可能在它赋值前就被调用）。 */
+let profile = ''
 const dshEnv = { ...process.env }
 
 /** 收尾：停验证实例、删 profile、删 tarball。 */
 function cleanup() {
   try {
     if (child !== undefined && child.exitCode === null) child.kill('SIGKILL')
+    try {
+      closeSync(bootLogFd)
+    } catch {
+      /* 已关闭 */
+    }
   } catch {
     /* 已经退了 */
   }
@@ -267,7 +283,8 @@ if (!options.skipAudit) {
 /* --------------------------------------------------------------- 2. 打包 */
 
 section('2. 打包')
-const pack = run('npm', ['pack', '--json'], { cwd: options.cwd })
+// --ignore-scripts：`prepare` 会把构建日志打进 stdout，污染 --json 输出（构建由调用方自己负责）
+const pack = run('npm', ['pack', '--json', '--ignore-scripts'], { cwd: options.cwd })
 if (!pack.ok) {
   fail('npm pack 失败', pack.stderr.trim().slice(0, 300))
   finish()
@@ -276,7 +293,16 @@ let packed = null
 try {
   packed = JSON.parse(pack.stdout)[0]
 } catch {
-  packed = null
+  // 仍然兜底：抓 stdout 里最后一个 JSON 数组（构建脚本可能插了别的输出）
+  const start = pack.stdout.lastIndexOf('[')
+  const end = pack.stdout.lastIndexOf(']')
+  if (start >= 0 && end > start) {
+    try {
+      packed = JSON.parse(pack.stdout.slice(start, end + 1))[0]
+    } catch {
+      packed = null
+    }
+  }
 }
 if (packed === null) {
   fail('无法解析 npm pack 输出')
@@ -301,7 +327,7 @@ else fail('package.json 没进包')
 
 /* --------------------------------------------------------- 3. 干净安装 */
 
-const profile = `verify-${String(id).replace(/[^a-zA-Z0-9._-]/g, '-')}`
+profile = `verify-${String(id).replace(/[^a-zA-Z0-9._-]/g, '-')}`
 if (options.isolate) {
   isolatedHome = mkdtempSync(path.join(tmpdir(), 'dsh-verify-home-'))
   dshEnv.DSH_HOME = isolatedHome
@@ -334,13 +360,21 @@ section('4. 启动验证实例')
 port = options.port !== 0 ? options.port : await freePort()
 info(`端口：${port}`)
 
-let bootLog = ''
+// stdout/stderr 走文件而不是 pipe：`dsh web` 会 fork 出真正的服务进程，
+// wrapper 一退出 pipe 就关闭，之后 fork 出去那半写的 token 全部丢失。
+const bootLogPath = path.join(tmpdir(), `dsh-verify-${String(id).replace(/[^a-zA-Z0-9._-]/g, '-')}-boot.log`)
+const bootLogFd = openSync(bootLogPath, 'w')
+const readBootLog = () => {
+  try {
+    return readFileSync(bootLogPath, 'utf8')
+  } catch {
+    return ''
+  }
+}
 child = spawn(options.dsh, ['--profile', profile, '--port', String(port), '--no-open'], {
   env: dshEnv,
-  stdio: ['ignore', 'pipe', 'pipe'],
+  stdio: ['ignore', bootLogFd, bootLogFd],
 })
-child.stdout.on('data', (chunk) => (bootLog += String(chunk)))
-child.stderr.on('data', (chunk) => (bootLog += String(chunk)))
 
 const deadline = Date.now() + options.bootTimeoutSec * 1000
 let listening = false
@@ -364,18 +398,18 @@ function bootErrors(text) {
 if (options.keep) {
   const dump = path.join(tmpdir(), `dsh-verify-${String(id).replace(/[^a-zA-Z0-9._-]/g, '-')}-boot.log`)
   try {
-    writeFileSync(dump, bootLog)
+    writeFileSync(dump, readBootLog())
     info(`启动输出已留存：${dump}`)
   } catch {
     /* 尽力而为 */
   }
 }
 if (listening) pass('验证实例已监听', `http://127.0.0.1:${port}`)
-else fail('验证实例没有起来', bootLog.split('\n').filter(Boolean).slice(-5).join(' | ').slice(0, 400))
+else fail('验证实例没有起来', readBootLog().split('\n').filter(Boolean).slice(-5).join(' | ').slice(0, 400))
 
 // 端口活着不等于启动成功：插件树可能在绑定端口之后才失败。
 {
-  const errors = bootErrors(bootLog)
+  const errors = bootErrors(readBootLog())
   if (errors.length > 0) fail('启动输出里有报错', errors.join(' ｜ ').slice(0, 500))
   else if (listening) pass('启动输出没有报错')
 }
@@ -418,7 +452,7 @@ const base = `http://127.0.0.1:${port}`
 async function waitForToken(timeoutMs) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const found = /token=([A-Za-z0-9_-]+)/.exec(bootLog)
+    const found = /token=([A-Za-z0-9_-]+)/.exec(readBootLog())
     if (found !== null) return found[1]
     if (child.exitCode !== null) return ''
     await sleep(300)
@@ -503,7 +537,7 @@ if (!hasClient) {
     const bundleUrl = urls.sort((a, b) => b.length - a.length)[0] ?? ''
     if (index.status === 401) {
       warn('抓 index 被拒（没有 token），跳过运行时界面校验（静态校验已通过）')
-    } else if (bundleUrl === '') fail('index 里找不到客户端 bundle 交付地址（客户端半没注册）', `HTTP ${index.status}${bootErrors(bootLog).length > 0 ? '｜' + bootErrors(bootLog)[0] : ''}`)
+    } else if (bundleUrl === '') fail('index 里找不到客户端 bundle 交付地址（客户端半没注册）', `HTTP ${index.status}${bootErrors(readBootLog()).length > 0 ? '｜' + bootErrors(readBootLog())[0] : ''}`)
     else if (bundleUrl.includes(`${id}/client.js`)) pass('bundle 已被 shell 收进启动清单', `${id}/client.js`)
     else fail('bundle 没进启动清单（面板/入口不会出现）', bundleUrl.slice(0, 150))
     if (bundleUrl !== '') {

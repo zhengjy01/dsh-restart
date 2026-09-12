@@ -36,7 +36,7 @@ const SECTION_ORDER = 216
 
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
 export const RESTART_GUIDANCE =
-  '本机已安装 dsh-restart 插件（一键重启 DSH）：装完/更新插件后不必再去终端重启——' +
+  '本机已安装 @zhengjunyao/dsh-restart 插件（一键重启 DSH）：装完/更新插件后不必再去终端重启——' +
   'Web GUI 侧边栏有「重启」入口、设置页有「重启」卡片，点一下即把重启交给一个**分离的重启助手**（等端口释放后用完全相同的命令重新拉起 DSH），' +
   '网页会自动重连并刷新；失败时该插件会直接把报错显示出来（页面内置重启遮罩 + 恢复控制台 http://127.0.0.1:3099，含启动日志与检测到的报错行），不必去翻终端日志。' +
   'Agent 侧工具：dsh_restart_status（查看宿主 pid/端口/版本/启动时长/启动命令、重启助手阶段与失败原因、最近重启记录、上次启动日志里的疑似报错行——只读）、' +
