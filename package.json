@@ -53,9 +53,10 @@
     "bundle": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "node tests/smoke.mjs && node tests/helper.mjs && node tests/routes.mjs && node tests/handoff.mjs && node tests/launchd.mjs",
-    "verify": "node scripts/portability.mjs --health /api/dsh-restart/probe --restart-route /api/dsh-restart/restart",
-    "verify:quick": "node scripts/portability.mjs --skip-audit --health /api/dsh-restart/probe",
-    "prepare": "npm run build"
+    "verify": "node scripts/portability.mjs --health /api/dsh-restart/probe",
+    "verify:quick": "node scripts/portability.mjs --skip-audit --stability 5 --health /api/dsh-restart/probe",
+    "prepare": "npm run build",
+    "verify:full": "node scripts/portability.mjs --health /api/dsh-restart/probe --restart-route /api/dsh-restart/restart"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
