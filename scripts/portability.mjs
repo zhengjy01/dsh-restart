@@ -23,6 +23,7 @@
  *   node scripts/portability.mjs --health /api/foo/probe --restart-route /api/foo/restart
  *   node scripts/portability.mjs --no-isolate   # 共享本机 ~/.dsh（默认是隔离的临时 home）
  *   node scripts/portability.mjs --json         # 机器可读报告
+ *   node scripts/portability.mjs --stability 30 # 就绪后多守一会儿（默认 15 秒）
  *   node scripts/portability.mjs --cwd <插件目录>
  *
  * 退出码：0 = 通过（可以发布），1 = 未通过，2 = 用法/环境错误。
@@ -59,6 +60,8 @@ const options = {
   isolate: !has('--no-isolate'),
   json: has('--json'),
   skipAudit: has('--skip-audit'),
+  /** 就绪后不再做稳定性观察（默认做）。 */
+  skipStability: has('--skip-stability'),
 }
 
 /* ------------------------------------------------------------------ 输出 */
@@ -590,5 +593,53 @@ if (options.restartRoute !== '') {
     }
   }
 }
+
+/* ------------------------------------------------- 8. 稳定性观察（迟到崩溃） */
+
+// 这次真的栽过：`dsh web` 先绑端口、后加载插件树，于是「端口应答 / 界面 200」可能只是
+// 一段**临时**状态——新宿主几秒后死于 `plugin tree failed to load … writer lock`，
+// 而门禁在它死之前就宣布通过了。所以就绪之后必须再守一段时间，确认它没在背后死掉。
+if (listening && !options.skipStability) {
+  section('8. 稳定性观察（就绪之后是否仍活着）')
+  const watchSec = Number(flag('--stability', '15')) || 15
+  const deadline2 = Date.now() + watchSec * 1000
+  let alive = true
+  let lastPid = null
+  let checks = 0
+  let firstError = ''
+  while (Date.now() < deadline2) {
+    try {
+      const response = await fetch(`${base}${healthPath}`)
+      if (!response.ok) {
+        alive = false
+        firstError = `健康路由 ${response.status}`
+        break
+      }
+      const body = await response.json().catch(() => null)
+      const pid = body?.pid ?? null
+      if (lastPid !== null && pid !== null && pid !== lastPid) {
+        alive = false
+        firstError = `进程被替换（${lastPid} → ${pid}）`
+        break
+      }
+      lastPid = pid
+      checks += 1
+    } catch (error) {
+      alive = false
+      firstError = String(error.message ?? error)
+      break
+    }
+    await sleep(2_000)
+  }
+  // 顺手再看一眼启动输出里有没有新的致命行
+  const fatal = bootErrors(readBootLog())
+  if (alive && fatal.length === 0) {
+    pass(`就绪后 ${watchSec}s 内保持稳定`, `${checks} 次探测，pid ${lastPid ?? '?'}`)
+  } else {
+    fail('就绪后没撑住（迟到崩溃 = 假成功）', firstError !== '' ? firstError : fatal.join(' ｜ ').slice(0, 300))
+  }
+}
+
+finish()
 
 finish()
