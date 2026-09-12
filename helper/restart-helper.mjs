@@ -88,6 +88,22 @@ const MAX_ATTEMPTS = Math.max(1, Number(spec.maxAttempts) || 2)
 const RING_LINES = Math.max(200, Number(spec.ringLines) || 600)
 const LINGER_MS = Math.max(0, Number(spec.lingerMs) || 4_000)
 /**
+ * How long a boot that answers the port must hold before readiness is
+ * reported. The port answering is not the same event as the host being up:
+ * `dsh web` binds it before the plugin tree loads, so this window is what
+ * separates "listening" from "survived the first seconds of its boot".
+ */
+const READY_CONFIRM_MS = Math.max(0, Number(spec.readyConfirmMs) || 4_000)
+/**
+ * How long a host that already reported ready is still watched before the
+ * helper lets go of it. Boot failures that wait on something slow surface long
+ * after the port answers — a credentials writer-lock timeout is 30s — so
+ * without this window a restart can be reported ready seconds before the new
+ * host dies, which is exactly the silent-success case this helper exists to
+ * prevent.
+ */
+const BOOT_WATCH_MS = Math.max(0, Number(spec.bootWatchMs) || 30_000)
+/**
  * `spawn` (default): this helper relaunches the host itself.
  * `observe`: something else owns the relaunch (a launchd job, a supervisor);
  *   the helper only waits, serves the console, and tails the log that owner
@@ -139,11 +155,24 @@ const ERROR_HINT = new RegExp(
   ].join('|'),
 )
 
+/**
+ * Boot-stage output no live host keeps running after.
+ *
+ * Deliberately narrow, and deliberately not {@link ERROR_HINT}: a healthy
+ * `dsh web` prints error-shaped lines all through its boot (`session/list
+ * failed`, a plugin warning, a retrying network call), and treating those as
+ * fatal would turn healthy restarts into failed ones. Only lines that mean the
+ * host is on its way out belong here.
+ */
+const FATAL_BOOT_HINT = /plugin tree failed to load/
+
 /** Append one line to the log file and the in-memory ring. */
 function record(line, stream = 'out') {
   const text = String(line).replace(ANSI, '')
   const at = Date.now()
-  ring.push({ t: at, s: stream, text })
+  // The attempt number rides along so a fatal line from a boot we already gave
+  // up on cannot condemn the attempt that is running now.
+  ring.push({ t: at, s: stream, text, attempt })
   if (ring.length > RING_LINES) ring.splice(0, ring.length - RING_LINES)
   // Only the host's own output can explain a failed boot; our 'sys' lines are
   // narration and would otherwise trip the detector on their own wording.
@@ -166,6 +195,22 @@ function makeLineSplitter(stream) {
     buffer = parts.pop() ?? ''
     for (const part of parts) if (part !== '') record(part, stream)
   }
+}
+
+/**
+ * The newest boot-fatal line the host printed, or null.
+ *
+ * Read from the ring rather than from `errors`: that list carries everything
+ * that looks like an error to a human, including lines a healthy host prints
+ * on the way up. Our own narration is skipped — it says "failed" a lot.
+ */
+function fatalBootLine() {
+  for (let index = ring.length - 1; index >= 0; index -= 1) {
+    const line = ring[index]
+    if (line.attempt !== attempt) continue
+    if (line.s !== 'sys' && FATAL_BOOT_HINT.test(line.text)) return line.text
+  }
+  return null
 }
 
 /** Fallback port actually bound (null until the console is listening). */
@@ -322,6 +367,61 @@ async function waitPortReady(port, host, timeoutMs, child) {
     if (Date.now() >= deadline) return false
     await sleep(300)
   }
+}
+
+/**
+ * Watch a boot that already answers the port.
+ *
+ * Three things end the watch early, and each of them means the new host is not
+ * the host the caller was promised: the process is gone, its output printed a
+ * line nothing survives, or the port stopped answering.
+ *
+ * @param child - the launched host, or null when we do not own it.
+ * @param windowMs - how long the boot has to hold.
+ * @returns the failure to report, or null when the host survived the window.
+ */
+async function watchBoot(child, windowMs) {
+  const deadline = Date.now() + windowMs
+  for (;;) {
+    const fatal = fatalBootLine()
+    if (fatal !== null) return { kind: 'boot', message: `启动输出报错：${fatal}` }
+    if (child !== null && child.exitCode !== null) {
+      const tail = errors.slice(-3).map((entry) => entry.text).join(' | ')
+      return {
+        kind: 'exit',
+        message: `新进程退出（code=${child.exitCode}）${tail === '' ? '' : '：' + tail}`,
+        exitCode: child.exitCode,
+      }
+    }
+    if (!(await portOpen(PORT, HOST))) {
+      return { kind: 'port', message: `新进程不再占用 ${URL_BASE}` }
+    }
+    if (Date.now() >= deadline) return null
+    await sleep(300)
+  }
+}
+
+/**
+ * Decide whether a boot that answers the port is really up.
+ *
+ * Two windows, because a `dsh` boot fails at two speeds. The settle window
+ * catches the fast ones (a plugin that cannot be imported, a module that is not
+ * there) before readiness is ever claimed. The watch that follows catches the
+ * late ones — a boot blocked on a lock or a slow plugin load looks healthy for
+ * tens of seconds first — and clears `readyAt` again, so the status file never
+ * keeps claiming a host that has since died.
+ *
+ * @returns null when the boot is confirmed, or the failure to report.
+ */
+async function confirmBoot(child) {
+  const early = await watchBoot(child, READY_CONFIRM_MS)
+  if (early !== null) return early
+  readyAt = Date.now()
+  setPhase('ready', `ready after ${((readyAt - startedAt) / 1000).toFixed(1)}s`)
+  const late = await watchBoot(child, BOOT_WATCH_MS)
+  if (late === null) return null
+  readyAt = null
+  return late
 }
 
 // --------------------------------------------------------------- child spawn
@@ -667,6 +767,17 @@ async function observeBoot() {
   for (;;) {
     follow()
     if (await portOpen(PORT, HOST)) {
+      // The owner's new host answers — but an answering port is not a host
+      // either here: the same "listening, then dead on a plugin" boot happens
+      // under launchd. Observe mode has no child handle, so the owner's log is
+      // the liveness signal.
+      const settled = await observeSettle(follow)
+      if (settled !== null) {
+        failure = settled
+        record(`[dsh-restart] attempt ${attempt} failed: ${failure.message}`, 'sys')
+        persist()
+        return 'failed'
+      }
       readyAt = Date.now()
       setPhase('ready', `ready after ${((readyAt - startedAt) / 1000).toFixed(1)}s`)
       return 'ready'
@@ -684,6 +795,29 @@ async function observeBoot() {
   }
 }
 
+/**
+ * Hold an owner-managed boot through the settle window.
+ *
+ * No long watch here, deliberately: keeping the port up is the owner's job, and
+ * a supervisor that restarts a flapping host would otherwise leave one failure
+ * in the log for this helper to wrongly pin on the restart it was asked to
+ * watch.
+ *
+ * @param follow - the owner-log tailer, pumped each pass so late lines land.
+ * @returns the failure to report, or null when the boot held.
+ */
+async function observeSettle(follow) {
+  const deadline = Date.now() + READY_CONFIRM_MS
+  for (;;) {
+    follow()
+    const fatal = fatalBootLine()
+    if (fatal !== null) return { kind: 'boot', message: `启动输出报错：${fatal}` }
+    if (!(await portOpen(PORT, HOST))) return { kind: 'port', message: `新进程不再占用 ${URL_BASE}` }
+    if (Date.now() >= deadline) return null
+    await sleep(300)
+  }
+}
+
 /** One launch attempt; resolves 'ready' | 'failed'. */
 async function attemptBoot() {
   if (MODE === 'observe') return observeBoot()
@@ -695,9 +829,12 @@ async function attemptBoot() {
   }
   setPhase('waiting-ready', `waiting for ${URL_BASE} to answer (up to ${Math.round(BOOT_TIMEOUT_MS / 1000)}s)`)
   if (await waitPortReady(PORT, HOST, BOOT_TIMEOUT_MS, child)) {
-    readyAt = Date.now()
-    setPhase('ready', `ready after ${((readyAt - startedAt) / 1000).toFixed(1)}s`)
-    return 'ready'
+    const late = await confirmBoot(child)
+    if (late === null) return 'ready'
+    failure = late
+    record(`[dsh-restart] attempt ${attempt} failed: ${failure.message}`, 'sys')
+    persist()
+    return 'failed'
   }
   const code = child.exitCode
   const tail = errors.slice(-3).map((entry) => entry.text).join(' | ')

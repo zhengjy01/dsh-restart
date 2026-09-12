@@ -29,7 +29,7 @@ const {
   specPath,
   statusPath,
 } = await import('../lib/index.js')
-const { hostInfo, isAlive, launchSignature, newestLogFile, tailFile } = await import('../lib/index.js')
+const { buildSpec, hostInfo, isAlive, launchSignature, newestLogFile, tailFile } = await import('../lib/index.js')
 
 let passed = 0
 let failed = 0
@@ -82,6 +82,24 @@ check('maxAttempts clamps to 5', clamped.maxAttempts === 5, String(clamped.maxAt
 check('fallbackPort clamps to >= 1', clamped.fallbackPort === 1, String(clamped.fallbackPort))
 check('unknown entry falls back to sidebar', clamped.entry === 'sidebar', String(clamped.entry))
 check('normalizeConfig keeps booleans', normalizeConfig({ autoReload: false }).autoReload === false)
+
+// The readiness windows: `dsh web` binds its port before the plugin tree loads,
+// so how long a boot has to hold is a real setting, not a constant in the
+// helper. Both ends clamp because 0 disables the window on purpose.
+check('readiness windows default', DEFAULT_CONFIG.readyConfirmMs === 4_000 && DEFAULT_CONFIG.bootWatchMs === 30_000)
+check('readiness windows clamp at 0', normalizeConfig({ readyConfirmMs: -5, bootWatchMs: -5 }).readyConfirmMs === 0)
+check(
+  'readiness windows clamp at the ceiling',
+  normalizeConfig({ bootWatchMs: 10 ** 9 }).bootWatchMs === 600_000,
+  String(normalizeConfig({ bootWatchMs: 10 ** 9 }).bootWatchMs),
+)
+const spec = await buildSpec({
+  config: normalizeConfig({ readyConfirmMs: 1_234, bootWatchMs: 5_678 }),
+  port: 3080,
+  host: '127.0.0.1',
+  url: 'http://127.0.0.1:3080',
+})
+check('the helper spec carries both readiness windows', spec.readyConfirmMs === 1_234 && spec.bootWatchMs === 5_678, JSON.stringify({ r: spec.readyConfirmMs, b: spec.bootWatchMs }))
 
 console.log('history')
 

@@ -8,7 +8,13 @@
  *      lines that explain it, serve them on the recovery console, and accept a
  *      manual retry;
  *   B. successful boot → the helper must wait for the port, relaunch, detect
- *      readiness, and report the boot time.
+ *      readiness, and report the boot time;
+ *   C. boot that answers the port and then dies on a plugin → readiness must be
+ *      withheld (or withdrawn) and the fatal boot line reported;
+ *   D. boot that answers the port and dies silently → liveness alone must end
+ *      the readiness claim;
+ *   E. healthy boot that prints error-shaped noise → readiness must hold, so
+ *      the fatal detection stays narrow.
  */
 
 import { spawn } from 'node:child_process'
@@ -203,6 +209,8 @@ console.log('B. successful boot')
     killGraceMs: 1_000,
     portFreeTimeoutMs: 3_000,
     lingerMs: 30_000,
+    readyConfirmMs: 400,
+    bootWatchMs: 1_200,
     ringLines: 300,
     dshVersion: 'test',
     profile: 'test',
@@ -224,6 +232,172 @@ console.log('B. successful boot')
 
   // Track the relaunched host so it can be cleaned up.
   spawned.push(status.childPid)
+}
+
+console.log('C. boot that answers the port and then dies on a plugin')
+
+{
+  // The real incident: `dsh web` binds 3080 before the plugin tree loads, so a
+  // boot that dies on a plugin answers the port for seconds first. Reporting
+  // `ready` on the port alone is what turned a dead host into a "successful"
+  // restart.
+  const target = await freePort()
+  const fallback = await freePort()
+  const statusFile = path.join(HOME, 'late-fatal-status.json')
+  const serverCode = [
+    "require('node:http').createServer((q,s)=>{s.end('ok')}).listen(" + target + ",'127.0.0.1',()=>{",
+    "  setTimeout(()=>{",
+    "    console.error('Error: dsh: plugin tree failed to load: failed to apply loader entry connection');",
+    '    process.exit(1)',
+    '  }, 700)',
+    '})',
+  ].join('\n')
+  const helperPid = await startHelper(HOME, {
+    port: target,
+    host: '127.0.0.1',
+    url: `http://127.0.0.1:${target}`,
+    file: process.execPath,
+    args: ['-e', serverCode],
+    cwd: HOME,
+    env: { PATH: process.env.PATH },
+    oldPid: 0,
+    logFile: path.join(HOME, 'late-fatal.log'),
+    statusFile,
+    fallbackPort: fallback,
+    bootTimeoutMs: 20_000,
+    maxAttempts: 1,
+    killGraceMs: 1_000,
+    portFreeTimeoutMs: 3_000,
+    lingerMs: 30_000,
+    readyConfirmMs: 200,
+    bootWatchMs: 6_000,
+    ringLines: 300,
+    dshVersion: 'test',
+    profile: 'test',
+  })
+  spawned.push(helperPid)
+
+  const status = await pollJson(
+    `http://127.0.0.1:${fallback}/status`,
+    (value) => value.phase === 'failed',
+    25_000,
+    'a boot that dies on a plugin must end up failed',
+  )
+
+  check('a late boot death is not reported as ready', status.phase === 'failed', status.phase)
+  check('the stale ready claim is withdrawn', status.readyAt === null, String(status.readyAt))
+  check('the exit code is captured', status.childExit?.code === 1, JSON.stringify(status.childExit))
+  check(
+    'the failure names the fatal boot line',
+    String(status.failure?.message ?? '').includes('plugin tree failed to load'),
+    status.failure?.message,
+  )
+  check(
+    'the failure report is written for a late death',
+    (await readFile(statusFile.replace(/status\.json$/, 'last-failure.md'), 'utf8')).includes('重启失败报告'),
+  )
+}
+
+console.log('D. boot that answers the port and then dies silently')
+
+{
+  // No error text at all: liveness has to be the signal, not the log.
+  const target = await freePort()
+  const fallback = await freePort()
+  const serverCode = [
+    "require('node:http').createServer((q,s)=>{s.end('ok')}).listen(" + target + ",'127.0.0.1',()=>{",
+    '  setTimeout(()=>process.exit(7), 700)',
+    '})',
+  ].join('\n')
+  const helperPid = await startHelper(HOME, {
+    port: target,
+    host: '127.0.0.1',
+    url: `http://127.0.0.1:${target}`,
+    file: process.execPath,
+    args: ['-e', serverCode],
+    cwd: HOME,
+    env: { PATH: process.env.PATH },
+    oldPid: 0,
+    logFile: path.join(HOME, 'late-silent.log'),
+    statusFile: path.join(HOME, 'late-silent-status.json'),
+    fallbackPort: fallback,
+    bootTimeoutMs: 20_000,
+    maxAttempts: 1,
+    killGraceMs: 1_000,
+    portFreeTimeoutMs: 3_000,
+    lingerMs: 30_000,
+    readyConfirmMs: 200,
+    bootWatchMs: 6_000,
+    ringLines: 300,
+    dshVersion: 'test',
+    profile: 'test',
+  })
+  spawned.push(helperPid)
+
+  const status = await pollJson(
+    `http://127.0.0.1:${fallback}/status`,
+    (value) => value.phase === 'failed',
+    25_000,
+    'a silent death must end up failed',
+  )
+
+  check('a silent late death is not reported as ready', status.phase === 'failed', status.phase)
+  check('the exit code is captured without any error line', status.childExit?.code === 7, JSON.stringify(status.childExit))
+  check('the readiness claim is withdrawn', status.readyAt === null, String(status.readyAt))
+}
+
+console.log('E. a healthy boot that prints error-shaped noise stays ready')
+
+{
+  // `dsh web` really does print lines like this on a healthy boot. Fatal
+  // detection has to stay narrow enough to ignore them.
+  const target = await freePort()
+  const fallback = await freePort()
+  const serverCode = [
+    "require('node:http').createServer((q,s)=>{s.end('ok')}).listen(" + target + ",'127.0.0.1',()=>{",
+    "  console.error('[dsh-task-board] session/list failed; treating the roster as unknown')",
+    "  console.error('Error: ECONNREFUSED while probing an optional provider')",
+    "  console.log('fake host up')",
+    '})',
+  ].join('\n')
+  const helperPid = await startHelper(HOME, {
+    port: target,
+    host: '127.0.0.1',
+    url: `http://127.0.0.1:${target}`,
+    file: process.execPath,
+    args: ['-e', serverCode],
+    cwd: HOME,
+    env: { PATH: process.env.PATH },
+    oldPid: 0,
+    logFile: path.join(HOME, 'noisy.log'),
+    statusFile: path.join(HOME, 'noisy-status.json'),
+    fallbackPort: fallback,
+    bootTimeoutMs: 20_000,
+    maxAttempts: 1,
+    killGraceMs: 1_000,
+    portFreeTimeoutMs: 3_000,
+    lingerMs: 30_000,
+    readyConfirmMs: 300,
+    bootWatchMs: 2_500,
+    ringLines: 300,
+    dshVersion: 'test',
+    profile: 'test',
+  })
+  spawned.push(helperPid)
+
+  await pollJson(
+    `http://127.0.0.1:${fallback}/status`,
+    (value) => value.phase === 'ready',
+    25_000,
+    'a noisy but healthy boot must reach ready',
+  )
+  // Sit past the watch window: readiness must not be withdrawn afterwards.
+  await sleep(3_000)
+  const status = await (await fetch(`http://127.0.0.1:${fallback}/status`)).json()
+
+  check('error-shaped noise does not fail a healthy boot', status.phase === 'ready', status.phase)
+  check('the readiness claim survives the watch window', status.readyAt !== null, String(status.readyAt))
+  check('no failure was recorded', status.failure === null || status.failure === undefined, JSON.stringify(status.failure))
 }
 
 await sleep(200)

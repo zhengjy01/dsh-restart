@@ -120,6 +120,8 @@ export interface RestartSpec {
   killGraceMs: number
   portFreeTimeoutMs: number
   lingerMs: number
+  readyConfirmMs: number
+  bootWatchMs: number
   ringLines: number
   dshVersion: string
   profile: string
@@ -313,6 +315,8 @@ export async function buildSpec(options: {
     killGraceMs: options.config.killGraceMs,
     portFreeTimeoutMs: options.config.portFreeTimeoutMs,
     lingerMs: options.config.lingerMs,
+    readyConfirmMs: options.config.readyConfirmMs,
+    bootWatchMs: options.config.bootWatchMs,
     ringLines: options.config.logLines,
     dshVersion: await readDshVersion(),
     profile: readProfile(),

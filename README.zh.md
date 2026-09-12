@@ -40,6 +40,14 @@
   报错行、退出码，并可一键「重试启动」。
 - **失败自动重试**：`maxAttempts`（默认 2）次内自动重试；都失败就停在那里等人工处理，
   不会把端口/日志丢掉。
+- **就绪不等于端口通了**：`dsh web` 会先绑端口、后加载插件树，所以「端口应答」远早于
+  「宿主真的起来了」。助手判定就绪要同时满足三条——端口应答、进程存活、启动输出里没有
+  boot 致命行——并先守住 `readyConfirmMs`（默认 4s）；此后还会继续观察
+  `bootWatchMs`（默认 30s），把「已经报了就绪、几秒后却自己死掉」的启动（例如凭证写锁
+  等 30 秒才超时）重新判为失败，而不是留下一个假的成功。
+  **launchd 托管的 observe 模式同规**：先守 `readyConfirmMs`，并跟随托管方日志判断有没有
+  boot 致命行（宿主进程不在助手手里，日志就是存活性信号）；托管路径刻意不做长观察——
+  守住端口是托管方的职责。
 - **Agent 工具**：`dsh_restart_status`（只读：宿主 pid/端口/版本/启动时长/启动命令、
   助手阶段与失败原因、最近重启记录、上次启动日志里的疑似报错行）、
   `dsh_restart`（真正重启；**必须已获得用户同意**并传 `confirm: true`，
@@ -85,6 +93,8 @@ dsh plugin --profile web add github:zhengjy01/dsh-restart
 | `killGraceMs` | `6000` | 端口迟迟不释放时，助手 SIGKILL 旧进程前的宽限 |
 | `portFreeTimeoutMs` | `25000` | 等旧进程释放端口的上限 |
 | `lingerMs` | `4000` | 就绪后助手退出前保留控制台的时间 |
+| `readyConfirmMs` | `4000` | 端口应答后、判定「已就绪」前必须守住的稳定时长（0 = 不守） |
+| `bootWatchMs` | `30000` | 已报就绪后继续观察新宿主、把「起来又死」改判为失败的时间窗（0 = 不守） |
 | `logLines` | `200` | 面板/接口返回的日志行数 |
 | `autoReload` | `true` | 新宿主应答后自动刷新页面 |
 | `showOverlay` | `true` | 重启时显示全屏遮罩 |
@@ -136,18 +146,21 @@ dsh plugin --profile web add github:zhengjy01/dsh-restart
 ## 测试
 
 ```sh
-pnpm test        # 129 项断言，五个套件
+pnpm test        # 168 项断言，五个套件
 ```
 
 - `tests/smoke.mjs` — 配置读写与钳制、历史、日志尾部与报错识别、启动签名、宿主信息；
 - `tests/helper.mjs` — **真的**跑助手：崩溃路径（捕获退出码、stderr 报错行、控制台页面、
-  手动重试）与成功路径（等端口 → 拉起 → 就绪计时）；
+  手动重试）、成功路径（等端口 → 拉起 → 就绪计时），以及就绪判定的三种边界：
+  宿主应答端口后才在插件上崩掉（不得报就绪，且要撤回已报的就绪状态、写入失败报告）、
+  应答端口后静默退出（没有任何报错行也要靠存活性判失败）、健康宿主打印错误形状的噪音
+  （不得误判为失败）；
 - `tests/routes.mjs` — 合成的 req/res 打全部路由，含 loopback/跨站/方法守卫；
 - `tests/handoff.mjs` — 端到端：假宿主进程 → POST 重启 → 旧进程真的退出 →
   助手用相同命令拉起第二代 → 端口重新应答（新 pid）、`restarted: true`、历史落盘；
 - `tests/launchd.mjs` — launchd 识别（**按 pid 匹配 `launchctl list`**，因为 Node 会把
   `XPC_SERVICE_NAME` 改写成 `0`）+ observe 模式（助手执行 kickCommand、跟随托管方日志、
-  **绝不自己 spawn**）。
+  **绝不自己 spawn**），以及托管宿主日志出现 boot 致命行时不得报就绪。
 
 ## 边界
 

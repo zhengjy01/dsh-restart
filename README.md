@@ -37,6 +37,12 @@ left. `dsh-restart` handles all three:
 - Failure handling: error lines are detected (Error / EADDRINUSE /
   MODULE_NOT_FOUND / stack frames), the boot log is shown in the overlay, and
   `maxAttempts` (default 2) automatic retries run before giving up.
+- Readiness is not "the port answers": `dsh web` binds its port before the
+  plugin tree loads, so the helper only reports ready once the port answers,
+  the process is still alive, and the boot output carries no fatal line — held
+  over `readyConfirmMs` (4s) first, then watched for `bootWatchMs` (30s) so a
+  host that reports ready and dies seconds later is reclassified as a failed
+  restart instead of a silent success.
 - Agent tools: `dsh_restart_status` (read-only) and `dsh_restart`, which demands
   `confirm: true` because the local standing rule is that DSH is never restarted
   without explicit user consent.
@@ -91,7 +97,7 @@ panel / dsh_restart
 ## Tests
 
 ```sh
-pnpm test    # 129 assertions across five suites
+pnpm test    # 168 assertions across five suites
 ```
 
 `smoke` (config/history/log detection/host identity), `helper` (the real helper

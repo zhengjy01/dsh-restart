@@ -8,7 +8,9 @@
  *
  *   A. detection + parsing + the kick command shape;
  *   B. observe mode: the helper runs the kick command, follows the owner's log,
- *      and must NOT spawn a host of its own.
+ *      and must NOT spawn a host of its own;
+ *   C. observe mode withholds readiness when the managed boot prints a fatal
+ *      line — the port answering is not the boot surviving.
  */
 
 import { spawn } from 'node:child_process'
@@ -193,6 +195,7 @@ console.log('B. observe mode')
       killGraceMs: 1_000,
       portFreeTimeoutMs: 3_000,
       lingerMs: 30_000,
+      readyConfirmMs: 400,
       ringLines: 200,
       dshVersion: 'test',
       profile: 'test',
@@ -240,6 +243,93 @@ console.log('B. observe mode')
     }
   }
   // The kicked host is a child of the helper; make sure it cannot outlive the test.
+  try {
+    const { execFileSync } = await import('node:child_process')
+    execFileSync('/usr/bin/pkill', ['-f', `listen(${target},'127.0.0.1'`], { stdio: 'ignore' })
+  } catch {
+    /* nothing matched */
+  }
+}
+
+console.log('C. observe mode withholds readiness on a fatal boot line')
+
+{
+  const target = await freePort()
+  const fallback = await freePort()
+  const specFile = path.join(HOME, 'observe-fatal-spec.json')
+  const observeLog = path.join(HOME, 'managed-fatal.err')
+  const statusFile = path.join(HOME, 'observe-fatal-status.json')
+  await writeFile(observeLog, 'launchd: starting job\n')
+  // The managed host answers the port while its own log says it is dying: the
+  // shape of the incident where a dead host was reported as a ready one.
+  const kickCommand = [
+    process.execPath,
+    '-e',
+    "const fs=require('node:fs');" +
+      `require('node:http').createServer((q,s)=>s.end('ok')).listen(${target},'127.0.0.1',()=>{` +
+      `fs.appendFileSync(${JSON.stringify(observeLog)},'Error: dsh: plugin tree failed to load: timed out waiting for the writer lock\\n')})`,
+  ]
+  await writeFile(
+    specFile,
+    JSON.stringify({
+      port: target,
+      host: '127.0.0.1',
+      url: `http://127.0.0.1:${target}`,
+      file: process.execPath,
+      args: ['-e', 'process.exit(99)'], // must never run: observe mode does not spawn
+      cwd: HOME,
+      env: { PATH: process.env.PATH },
+      oldPid: 0,
+      logFile: path.join(HOME, 'observe-fatal.log'),
+      statusFile,
+      fallbackPort: fallback,
+      bootTimeoutMs: 15_000,
+      maxAttempts: 1,
+      killGraceMs: 1_000,
+      portFreeTimeoutMs: 3_000,
+      lingerMs: 30_000,
+      readyConfirmMs: 2_500,
+      ringLines: 200,
+      dshVersion: 'test',
+      profile: 'test',
+      mode: 'observe',
+      owner: 'launchd com.test.job',
+      kickCommand,
+      kickDelayMs: 300,
+      observeLog,
+    }),
+  )
+
+  const helper = spawn(process.execPath, [HELPER, '--spec', specFile], { detached: true, stdio: 'ignore' })
+  helper.unref()
+
+  const status = await pollJson(
+    `http://127.0.0.1:${fallback}/status`,
+    (value) => value.phase === 'ready' || value.phase === 'failed',
+    30_000,
+    'observe-mode console (fatal boot)',
+  )
+
+  check(
+    'a fatal managed boot is not reported as ready',
+    status.phase === 'failed',
+    `${status.phase}: ${JSON.stringify(status.failure)}`,
+  )
+  check(
+    'the failure names the fatal boot line',
+    String(status.failure?.message ?? '').includes('plugin tree failed to load'),
+    status.failure?.message,
+  )
+  check('observe mode never spawns its own child', status.childPid === null, String(status.childPid))
+
+  for (const pid of [helper.pid]) {
+    if (typeof pid !== 'number' || pid <= 0) continue
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      /* already gone */
+    }
+  }
   try {
     const { execFileSync } = await import('node:child_process')
     execFileSync('/usr/bin/pkill', ['-f', `listen(${target},'127.0.0.1'`], { stdio: 'ignore' })

@@ -43,6 +43,18 @@ export interface RestartConfig {
   portFreeTimeoutMs: number
   /** How long the helper keeps its console up after success before exiting. */
   lingerMs: number
+  /**
+   * How long a boot that answers the port must hold before the helper reports
+   * it ready. `dsh web` binds its port before the plugin tree loads, so this is
+   * what separates "listening" from "survived the start of its boot".
+   */
+  readyConfirmMs: number
+  /**
+   * How long the helper keeps watching a host that already reported ready.
+   * Boot failures that wait on something slow (a credentials writer-lock
+   * timeout is 30s) surface well after the port answers.
+   */
+  bootWatchMs: number
   /** Lines of boot log kept for display. */
   logLines: number
   /** Auto-reload the page once the new host answers. */
@@ -67,6 +79,8 @@ export const DEFAULT_CONFIG: RestartConfig = {
   killGraceMs: 6_000,
   portFreeTimeoutMs: 25_000,
   lingerMs: 4_000,
+  readyConfirmMs: 4_000,
+  bootWatchMs: 30_000,
   logLines: 200,
   autoReload: true,
   showOverlay: true,
@@ -167,6 +181,8 @@ export function normalizeConfig(patch: Partial<RestartConfig> | undefined, base 
     killGraceMs: intIn(source.killGraceMs ?? base.killGraceMs, base.killGraceMs, 0, 120_000),
     portFreeTimeoutMs: intIn(source.portFreeTimeoutMs ?? base.portFreeTimeoutMs, base.portFreeTimeoutMs, 0, 300_000),
     lingerMs: intIn(source.lingerMs ?? base.lingerMs, base.lingerMs, 0, 600_000),
+    readyConfirmMs: intIn(source.readyConfirmMs ?? base.readyConfirmMs, base.readyConfirmMs, 0, 120_000),
+    bootWatchMs: intIn(source.bootWatchMs ?? base.bootWatchMs, base.bootWatchMs, 0, 600_000),
     logLines: intIn(source.logLines ?? base.logLines, base.logLines, 20, 2_000),
     autoReload: typeof source.autoReload === 'boolean' ? source.autoReload : base.autoReload,
     showOverlay: typeof source.showOverlay === 'boolean' ? source.showOverlay : base.showOverlay,
