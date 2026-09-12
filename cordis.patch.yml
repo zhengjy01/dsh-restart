@@ -1,0 +1,17 @@
+# dsh-restart bundle patch: inserts the plugin row into the profile roster.
+# Applied as a profile bundle layer (declared by the `dsh.bundle.patch`
+# manifest field in package.json). Activate with:
+#
+#   # local development (link)
+#   dsh plugin --profile web add @zhengjunyao/dsh-restart
+#   # after publishing to GitHub (repo tagged with the `dsh-plugin` topic)
+#   dsh plugin --profile web add github:zhengjy01/dsh-restart
+- insert:
+    - id: restart
+      name: '@zhengjunyao/dsh-restart'
+      config:
+        announceToAgent: true   # 在系统提示中公告插件（工具 + 能力说明）
+        enabled: true           # 插件总开关
+        # 其余设置只是「首次写入 ~/.dsh/dsh-restart.json 的种子」；真正的
+        # 开关在配置文件里（面板「插件设置」或直接改文件），重启助手每次
+        # 重启都会重新读取。
