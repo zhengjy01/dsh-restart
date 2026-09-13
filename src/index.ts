@@ -41,7 +41,7 @@ export const RESTART_GUIDANCE =
   '网页会自动重连并刷新；失败时该插件会直接把报错显示出来（页面内置重启遮罩 + 恢复控制台 http://127.0.0.1:3099，含启动日志与检测到的报错行），不必去翻终端日志。' +
   'Agent 侧工具：dsh_restart_status（查看宿主 pid/端口/版本/启动时长/启动命令、重启助手阶段与失败原因、最近重启记录、上次启动日志里的疑似报错行——只读）、' +
   'dsh_restart（真正重启，**必须已获得用户明确同意**并传 confirm: true，否则只返回提示不执行；重启会中断当前回合与连接，网页端自动重连）。' +
-  '配置存 ~/.dsh/dsh-restart.json（0600），日志在 ~/.dsh/dsh-restart/logs/。' +
+  '配置存 DSH_HOME 下的 dsh-restart.json（默认 ~/.dsh/dsh-restart.json，0600），日志在 DSH_HOME 下的 dsh-restart/logs/（DSH_HOME 未设时回落 ~/.dsh；搬迁过 home 的机器按 DSH_HOME 走）。' +
   '注意：本机铁律规定**未经用户同意不得重启或关闭 DSH**，所以即使装了本插件，也要先问过用户再调用 dsh_restart。' +
   '用户提到「重启 / 重启一下 / 重启 DSH / 重载插件 / 一键重启」时即指本插件，请据此协作。'
 
