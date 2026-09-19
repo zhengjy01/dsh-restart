@@ -61,8 +61,8 @@ left. `dsh-restart` handles all three:
   *relative* Location carrying the current process's token, so the one URL that
   never expires is also the one that works on any authority. It is what the 401
   card hands out — bookmark it and a missing cookie stops mattering.
-- The waiting overlay says **don't reload manually** (~8–10s, the page returns by
-  itself): refreshing inside the restart window lands on
+- The waiting overlay says **don't reload manually** (the port is dead for ~3–5s,
+  then the page returns by itself): refreshing inside the restart window lands on
   `ERR_CONNECTION_REFUSED`, where the browser has replaced the page and no
   client-side recovery can run.
 - History at `~/.dsh/dsh-restart/history.json`; logs under

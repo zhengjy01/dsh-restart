@@ -427,7 +427,7 @@ async function probeOnce(): Promise<void> {
 
   setState({
     phase: state.phase === 'failed' ? 'failed' : 'waiting',
-    note: state.phase === 'failed' ? '启动失败，可重试或查看报错。' : '正在等待新宿主启动…（约 8–10 秒，请勿手动刷新：本页会自己回来）',
+    note: state.phase === 'failed' ? '启动失败，可重试或查看报错。' : '正在等待新宿主启动…（端口会先空约 3–5 秒；请勿手动刷新，本页会自己回来）',
   })
 
   // The old host is gone by now; the helper's console is the only live source.
@@ -553,7 +553,7 @@ export async function startRestart(reason = '', source = 'web'): Promise<void> {
       fallbackUrl: ack.fallbackUrl,
       port: ack.fallbackPort,
       logFile: ack.logFile,
-      note: '旧进程正在退出，等待新宿主启动…（约 8–10 秒，请勿手动刷新：本页会自己回来）',
+      note: '旧进程正在退出，等待新宿主启动…（端口会先空约 3–5 秒；请勿手动刷新，本页会自己回来）',
       config,
     })
     persist()
