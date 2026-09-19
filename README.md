@@ -57,6 +57,14 @@ left. `dsh-restart` handles all three:
   ends with the app back on screen, not with an address to copy. If even that
   fails it falls back to the clickable **「用新 token 地址打开」** link, so a dead
   cookie can never turn a reload into the host's plain-text 401 page.
+- Bookmarkable entry: `GET /api/dsh-restart/goto` always answers 303 with a
+  *relative* Location carrying the current process's token, so the one URL that
+  never expires is also the one that works on any authority. It is what the 401
+  card hands out — bookmark it and a missing cookie stops mattering.
+- The waiting overlay says **don't reload manually** (~8–10s, the page returns by
+  itself): refreshing inside the restart window lands on
+  `ERR_CONNECTION_REFUSED`, where the browser has replaced the page and no
+  client-side recovery can run.
 - History at `~/.dsh/dsh-restart/history.json`; logs under
   `~/.dsh/dsh-restart/logs/`; config at `~/.dsh/dsh-restart.json` (0600).
 

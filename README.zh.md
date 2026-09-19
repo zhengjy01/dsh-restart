@@ -61,6 +61,11 @@
   换回来，重新校验确认已认证后才让页面自己刷新回应用——一次重启结束时页面是**自己回来的**，
   不用复制地址开新标签页。交换失败时才回落到可点击的**「用新 token 地址打开」**链接，所以
   cookie 存不下也不会把页面带进宿主的纯文本 401 页。
+- **永久入口（可收藏）**：`GET /api/dsh-restart/goto` 永远 303 到本进程当前 token（相对地址）。
+  把它收藏起来就是「永远能进站的那条地址」——cookie 没了、停在纯文本 401 页、重启期间手刷过头，
+  点一下都能回来；401 卡片的主按钮与复制按钮给的就是它。
+- **等待期提示「请勿手动刷新」**：重启窗口里自己按刷新会落进浏览器的 `ERR_CONNECTION_REFUSED`
+  （那一刻页面已被浏览器错误页替换，插件救不了），所以提示写明「约 8–10 秒，本页会自己回来」。
 - **重启历史**：`~/.dsh/dsh-restart/history.json` 记录每次重启的时间、来源、原因、
   新旧 pid 与日志路径。
 
@@ -119,6 +124,7 @@ dsh plugin --profile web add github:zhengjy01/dsh-restart
 | GET | `/api/dsh-restart/status` | 宿主 + 助手 + 配置 + 历史 |
 | GET | `/api/dsh-restart/probe` | 极小存活探针（重连时高频轮询） |
 | GET | `/api/dsh-restart/auth` | 本进程当前 launch token 地址（**故意不要求 cookie**，仍是 loopback-only） |
+| GET | `/api/dsh-restart/goto` | **永久入口**：303 到本进程当前 token（相对地址 ⇒ cookie 换回本 authority）。可收藏、不会过期 |
 | POST | `/api/dsh-restart/restart` | 交接重启，先回 202 再退出本进程 |
 | GET | `/api/dsh-restart/logs` | 启动日志尾部 + 疑似报错行 |
 | GET | `/api/dsh-restart/history` | 重启记录 |

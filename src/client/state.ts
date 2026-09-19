@@ -283,6 +283,27 @@ function clearRestartFields(): void {
 }
 
 /**
+ * The never-expiring entry path (see `RESTART_API.goto`).
+ *
+ * Relative on purpose: handed to an `<a href>` it resolves against whatever
+ * authority the tab is on, so no origin is baked into the UI. It always ends at
+ * the host's *current* token, which is what mints a cookie — so this is the one
+ * address worth bookmarking, and the one to hand a user whose cookie is gone.
+ */
+export const STABLE_ENTRY_PATH = '/api/dsh-restart/goto'
+
+/** Absolute form of {@link STABLE_ENTRY_PATH} for display and copying. */
+export function stableEntryUrl(): string {
+  try {
+    const origin = typeof location === 'undefined' ? '' : location.origin
+    if (origin === '' || origin === 'null') return STABLE_ENTRY_PATH
+    return origin + STABLE_ENTRY_PATH
+  } catch {
+    return STABLE_ENTRY_PATH
+  }
+}
+
+/**
  * Rebuild the host's token URL on **this tab's** authority.
  *
  * Cookies are per authority, so a tab opened as `localhost:3080` cannot use the
@@ -392,7 +413,7 @@ async function probeOnce(): Promise<void> {
       // plain-text 401 page, so keep the page alive and show the fresh URL.
       setState({
         reloadAt: null,
-        note: '宿主已恢复，但本页面的旧 token 已失效（401）——请用下方「新地址」重新打开。',
+        note: '宿主已恢复，但本页面的旧 token 已失效（401）——请用下方「永久入口」重新打开（可收藏）。',
       })
       return
     }
@@ -406,7 +427,7 @@ async function probeOnce(): Promise<void> {
 
   setState({
     phase: state.phase === 'failed' ? 'failed' : 'waiting',
-    note: state.phase === 'failed' ? '启动失败，可重试或查看报错。' : '正在等待新宿主启动…',
+    note: state.phase === 'failed' ? '启动失败，可重试或查看报错。' : '正在等待新宿主启动…（约 8–10 秒，请勿手动刷新：本页会自己回来）',
   })
 
   // The old host is gone by now; the helper's console is the only live source.
@@ -532,7 +553,7 @@ export async function startRestart(reason = '', source = 'web'): Promise<void> {
       fallbackUrl: ack.fallbackUrl,
       port: ack.fallbackPort,
       logFile: ack.logFile,
-      note: '旧进程正在退出，等待新宿主启动…',
+      note: '旧进程正在退出，等待新宿主启动…（约 8–10 秒，请勿手动刷新：本页会自己回来）',
       config,
     })
     persist()

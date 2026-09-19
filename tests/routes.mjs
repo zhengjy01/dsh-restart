@@ -154,6 +154,34 @@ check('the auth route stays loopback-only', authForeign.status === 403, String(a
 const authPost = await call(authRoutes, RESTART_API.auth, { method: 'POST' })
 check('POST /auth is refused (405)', authPost.status === 405, String(authPost.status))
 
+console.log('stable entry (the address worth bookmarking)')
+
+check('the goto route is registered', RESTART_API.goto === '/api/dsh-restart/goto')
+
+const gotoNoProvider = await call(routes, RESTART_API.goto)
+check('goto degrades to a plain root with no provider', gotoNoProvider.status === 303 && gotoNoProvider.headers.location === '/', String(gotoNoProvider.headers.location))
+check('goto is never cached (a stale redirect would defeat it)', gotoNoProvider.headers['cache-control'] === 'no-store', String(gotoNoProvider.headers['cache-control']))
+
+const gotoLive = await call(authRoutes, RESTART_API.goto)
+check(
+  'goto redirects to this process\u2019s current token',
+  gotoLive.status === 303 && gotoLive.headers.location === '/?token=SECOND',
+  String(gotoLive.headers.location),
+)
+liveToken = 'http://127.0.0.1:4321/?token=THIRD'
+const gotoTokened = await call(authRoutes, RESTART_API.goto)
+check('goto reads the token per request (not cached at mount)', gotoTokened.headers.location === '/?token=THIRD', String(gotoTokened.headers.location))
+check(
+  'goto is a RELATIVE redirect, so the tab keeps its own authority',
+  typeof gotoTokened.headers.location === 'string' && gotoTokened.headers.location.startsWith('/') && !gotoTokened.headers.location.includes('127.0.0.1'),
+  String(gotoTokened.headers.location),
+)
+
+const gotoForeign = await call(authRoutes, RESTART_API.goto, { remote: '10.0.0.5' })
+check('the goto route stays loopback-only', gotoForeign.status === 403, String(gotoForeign.status))
+const gotoPost = await call(authRoutes, RESTART_API.goto, { method: 'POST' })
+check('POST /goto is refused (405)', gotoPost.status === 405, String(gotoPost.status))
+
 console.log('logs + history + helper')
 
 const logs = await call(routes, RESTART_API.logs)

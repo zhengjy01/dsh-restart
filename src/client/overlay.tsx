@@ -20,6 +20,8 @@ import {
   installSelfHealWatchers,
   retryBoot,
   resumeIfPending,
+  stableEntryUrl,
+  STABLE_ENTRY_PATH,
   useRestartState,
   type RestartState,
 } from './state.ts'
@@ -152,6 +154,14 @@ function Overlay() {
       setCopied(false)
     }
   }
+  const copyStableEntry = async (): Promise<void> => {
+    try {
+      await navigator.clipboard?.writeText(stableEntryUrl())
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }
   const copy = async (): Promise<void> => {
     // Prefer the helper's own report: it carries the exit code, the detected
     // error lines and the raw boot output in one paste-ready document.
@@ -221,12 +231,17 @@ function Overlay() {
             <div className="dshrst-auth">
               <strong>本页面已失去登录（401）</strong>
               <div className="dshrst-muted">
-                每次 dsh web 启动都会更换 launch token，旧标签页 URL 里的旧 token 会被拒绝；
-                cookie 仍有效时也可直接重开站点。请用下面这个当前进程的新地址打开：
+                每次 dsh web 启动都会更换 launch token，旧标签页 URL 里的旧 token 会被拒绝。
+                永久入口每次都会换到当前进程的 token，因此可以收藏、永远有效：
               </div>
+              <a href={STABLE_ENTRY_PATH} target="_top" rel="noreferrer">
+                用永久入口进站
+              </a>
+              <code>{stableEntryUrl()}</code>
+              <div className="dshrst-muted">本次地址（只在这次启动有效，作为兜底）：</div>
               {authUrl !== '' ? (
                 <a href={authUrl} target="_top" rel="noreferrer">
-                  用新 token 地址打开
+                  用本次 token 地址打开
                 </a>
               ) : (
                 <span className="dshrst-muted">正在读取新地址…（也可在终端查看 `dsh web` 打印的 URL）</span>
@@ -252,20 +267,35 @@ function Overlay() {
           </div>
 
           <div className="dshrst-actions">
-            {state.authRequired && authUrl !== '' ? (
+            {state.authRequired ? (
               <>
                 <button
                   type="button"
                   className="primary"
                   onClick={() => {
-                    location.href = authUrl
+                    location.href = STABLE_ENTRY_PATH
                   }}
                 >
-                  用新 token 地址打开
+                  用永久入口进站
                 </button>
-                <button type="button" onClick={() => void copyAuthUrl()}>
-                  {copied ? '已复制' : '复制新地址'}
+                <button type="button" onClick={() => void copyStableEntry()}>
+                  {copied ? '已复制' : '复制永久入口地址'}
                 </button>
+                {authUrl !== '' ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      location.href = authUrl
+                    }}
+                  >
+                    用本次地址打开
+                  </button>
+                ) : null}
+                {authUrl !== '' ? (
+                  <button type="button" onClick={() => void copyAuthUrl()}>
+                    {copied ? '已复制' : '复制本次地址'}
+                  </button>
+                ) : null}
               </>
             ) : null}
             {state.phase === 'ready' && !state.authRequired ? (

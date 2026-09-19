@@ -45,6 +45,7 @@ export const RESTART_API = {
   status: '/api/dsh-restart/status',
   probe: '/api/dsh-restart/probe',
   auth: '/api/dsh-restart/auth',
+  goto: '/api/dsh-restart/goto',
   restart: '/api/dsh-restart/restart',
   logs: '/api/dsh-restart/logs',
   history: '/api/dsh-restart/history',
@@ -154,6 +155,16 @@ export interface RestartStatusPayload {
   history: unknown[]
   logFiles: unknown[]
   endpoints: typeof RESTART_API
+}
+
+/** `?token=…` from a token URL ('' when the provider refused or the URL is odd). */
+function tokenSearchOf(url: string): string {
+  if (url === '') return ''
+  try {
+    return new URL(url).search
+  } catch {
+    return ''
+  }
 }
 
 /** Ask the helper (via its console port) for its live status. */
@@ -305,6 +316,36 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
           port: deps.port,
           pid: process.pid,
         })
+      },
+    },
+    {
+      kind: 'exact' as const,
+      path: RESTART_API.goto,
+      handler: (req: IncomingMessage, res: ServerResponse) => {
+        // The never-expiring entry point: a bookmarkable URL that always walks
+        // the browser through the *current* process's token exchange. Without
+        // it, a tab whose cookie is gone can only be rescued by copying a token
+        // URL out of the terminal — the one step a user should never have to do.
+        // Unauthenticated + loopback-only, exactly like `/auth`.
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        // A *relative* Location on purpose: the browser resolves it against the
+        // authority it is already on, so a tab opened as `localhost:3080` keeps
+        // that authority. Cookies are per authority, so redirecting such a tab
+        // to `127.0.0.1:3080` would mint a cookie it cannot use.
+        const search = tokenSearchOf(currentAuthUrl())
+        res.writeHead(303, {
+          'cache-control': 'no-store',
+          'referrer-policy': 'no-referrer',
+          location: search === '' ? '/' : '/' + search,
+        })
+        res.end()
       },
     },
     {

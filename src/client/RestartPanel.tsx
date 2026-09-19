@@ -20,7 +20,7 @@ import {
   type RestartConfig,
   type StatusPayload,
 } from './api.ts'
-import { checkAuth, refreshConfig, startRestart, useRestartState } from './state.ts'
+import { checkAuth, refreshConfig, stableEntryUrl, STABLE_ENTRY_PATH, startRestart, useRestartState } from './state.ts'
 
 /** Module-level API client (stateless; the component closes over it). */
 const api = new RestartApi()
@@ -404,8 +404,21 @@ export function RestartPanel(props: { variant?: 'settings' | 'floating'; onClose
         <div style={{ ...s.section, borderTop: 'none', border: '1px solid ' + DANGER, borderRadius: '8px', padding: '10px 12px' }}>
           <div style={s.error}>本页面已失去登录（401）：旧标签页的 launch token 已失效</div>
           <div style={s.muted}>
-            每次 dsh web 启动都会更换 launch token；cookie 仍有效时重开站点即可。请用当前进程的新地址打开：
+            每次 dsh web 启动都会更换 launch token。永久入口每次都会换到当前进程的 token，
+            可以收藏、永远有效：
           </div>
+          <a
+            href={STABLE_ENTRY_PATH}
+            target="_top"
+            rel="noreferrer"
+            style={{ color: ACCENT, fontWeight: 600, wordBreak: 'break-all', fontSize: '12px' }}
+          >
+            用永久入口进站
+          </a>
+          <div style={{ ...s.value, fontFamily: 'ui-monospace, Menlo, monospace', fontSize: '11.5px' }}>
+            {stableEntryUrl()}
+          </div>
+          <div style={s.muted}>本次地址（只在这次启动有效，作为兜底）：</div>
           {live.authUrl !== '' ? (
             <a
               href={live.authUrl}
@@ -413,10 +426,10 @@ export function RestartPanel(props: { variant?: 'settings' | 'floating'; onClose
               rel="noreferrer"
               style={{ color: ACCENT, fontWeight: 600, wordBreak: 'break-all', fontSize: '12px' }}
             >
-              用新 token 地址打开
+              用本次 token 地址打开
             </a>
           ) : (
-            <div style={s.muted}>正在读取新地址…（也可在终端查看 dsh web 打印的 URL）</div>
+            <div style={s.muted}>正在读取本次地址…（也可在终端查看 dsh web 打印的 URL）</div>
           )}
           {live.authUrl !== '' ? (
             <div style={{ ...s.value, fontFamily: 'ui-monospace, Menlo, monospace', fontSize: '11.5px' }}>
@@ -428,11 +441,22 @@ export function RestartPanel(props: { variant?: 'settings' | 'floating'; onClose
               type="button"
               style={s.button}
               onClick={() => {
-                void copyText(live.authUrl).then((ok) => setNotice(ok ? '已复制新地址' : '复制失败'))
+                void copyText(stableEntryUrl()).then((ok) => setNotice(ok ? '已复制永久入口地址' : '复制失败'))
               }}
             >
-              复制新地址
+              复制永久入口地址
             </button>
+            {live.authUrl !== '' ? (
+              <button
+                type="button"
+                style={s.button}
+                onClick={() => {
+                  void copyText(live.authUrl).then((ok) => setNotice(ok ? '已复制本次地址' : '复制失败'))
+                }}
+              >
+                复制本次地址
+              </button>
+            ) : null}
             <button
               type="button"
               style={s.button}
