@@ -765,3 +765,35 @@ export function installSelfHealWatchers(): void {
 export function useRestartState(): RestartState {
   return useSyncExternalStore(subscribe, getState, getState)
 }
+
+/**
+ * Ask the browser to confirm a manual reload while a restart is in flight.
+ *
+ * Refreshing inside the restart window is the one way the user can destroy this
+ * page for good: the browser swaps the document for its own error page, taking
+ * the client bundle — and with it every recovery path — out of the picture. A
+ * `beforeunload` confirm turns that accident into a choice: cancel it, and the
+ * page returns by itself a few seconds later.
+ *
+ * The guard is phase-gated rather than simply on/off, which is also what keeps
+ * our OWN reload working: by the time `scheduleReload()` fires, the phase is
+ * already `ready`.
+ *
+ * Installed at module load (not from one surface), so it is armed whichever
+ * entry started the restart, and inert in every other phase.
+ */
+function installUnloadGuard(): void {
+  try {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+    window.addEventListener('beforeunload', (event: BeforeUnloadEvent) => {
+      if (state.phase !== 'requesting' && state.phase !== 'waiting') return
+      event.preventDefault()
+      // Chrome still requires returnValue to be set to raise the prompt.
+      event.returnValue = ''
+    })
+  } catch {
+    /* non-browser environment: nothing to guard */
+  }
+}
+
+installUnloadGuard()

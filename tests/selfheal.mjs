@@ -69,8 +69,11 @@ globalThis.location = {
     reloads++
   },
 }
+const windowListeners = new Map()
 globalThis.window = {
-  addEventListener: () => {},
+  addEventListener: (type, handler) => {
+    windowListeners.set(type, handler)
+  },
   __ModuleLoader__: { load: (mod) => { captured = mod } },
 }
 globalThis.document = { visibilityState: 'visible', addEventListener: () => {} }
@@ -283,6 +286,53 @@ check('once the cookie is valid again the 401 flag clears', t.getState().authReq
 scenario.index = 404
 await t.checkAuth()
 check('an unknown index answer is not treated as 401', t.getState().authRequired === false)
+
+await reset()
+
+// --- C. 重启窗口内的刷新守卫（beforeunload） ---------------------------------------
+
+console.log('\nC. 重启窗口内的刷新守卫（beforeunload）')
+
+const guard = windowListeners.get('beforeunload')
+check('the unload guard is armed at module load', typeof guard === 'function')
+
+/** One synthetic beforeunload event. */
+function unloadEvent() {
+  return {
+    prevented: false,
+    returnValue: undefined,
+    preventDefault() {
+      this.prevented = true
+    },
+  }
+}
+
+let unload = unloadEvent()
+guard(unload)
+check('an idle page never blocks a normal reload', unload.prevented === false && unload.returnValue === undefined)
+
+// Mid-restart is exactly the window where a manual reload is fatal: the browser
+// error page replaces the document and the client bundle goes with it.
+scenario.probe = 'down'
+scenario.restart = 'ok'
+await t.startRestart('unload guard regression', 'test')
+check('a restart in flight lands in waiting', t.getState().phase === 'waiting', t.getState().phase)
+unload = unloadEvent()
+guard(unload)
+check(
+  'a reload inside the restart window is stopped by a confirm',
+  unload.prevented === true && unload.returnValue === '',
+  String(unload.returnValue),
+)
+
+// Once the host answers, the page reloads itself: the guard must be inert again
+// or it would prompt the user out of our own recovery.
+scenario.probe = 'up'
+await t.checkNow()
+check('a recovered host lands in ready', t.getState().phase === 'ready', t.getState().phase)
+unload = unloadEvent()
+guard(unload)
+check('the guard is inert again before our own reload', unload.prevented === false)
 
 await reset()
 
