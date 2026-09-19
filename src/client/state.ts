@@ -25,8 +25,10 @@
  *   2. **Stale launch token.** Every `dsh web` boot mints a new launch token, so
  *      an old tab's URL is refused with 401 once its cookie is gone. Because the
  *      plugin routes are loopback-only and cookie-free, this page can always ask
- *      the host for its *current* token URL and offer it as a clickable link
- *      instead of navigating into the host's plain-text 401 page.
+ *      the host for its *current* token URL and swap it for a cookie **in place**
+ *      (same authority as the tab, no navigation), then reload only once the tab
+ *      really authenticates. A link remains for the case where even that fails,
+ *      so a dead cookie can never become a reload into the plain-text 401 page.
  */
 
 import { useSyncExternalStore } from 'react'
@@ -136,6 +138,14 @@ let noticeTimer: ReturnType<typeof setTimeout> | null = null
 let probing = false
 let reconciling = false
 let watchersInstalled = false
+/**
+ * One in-place token exchange per page load.
+ *
+ * A 401 means the tab's cookie is gone; the current process's token is the only
+ * thing that can mint another. Trying once is a heal; trying forever would be a
+ * loop when cookies cannot be stored at all, so the manual link takes over.
+ */
+let authExchangeTried = false
 
 /** Current snapshot (stable identity between mutations). */
 export function getState(): RestartState {
@@ -273,11 +283,37 @@ function clearRestartFields(): void {
 }
 
 /**
+ * Rebuild the host's token URL on **this tab's** authority.
+ *
+ * Cookies are per authority, so a tab opened as `localhost:3080` cannot use the
+ * cookie the host would mint for `127.0.0.1:3080` — and vice versa. Only the
+ * token travels with the URL; the origin stays the one the user is already on,
+ * so a refresh in the *same* tab keeps working afterwards.
+ *
+ * @param fresh the host's own token URL ('' when the provider refused).
+ * @returns the same token on `location.origin`, or '' when it cannot be rebuilt.
+ */
+function tokenUrlOnThisOrigin(fresh: string): string {
+  if (fresh === '') return ''
+  try {
+    const origin = typeof location === 'undefined' ? '' : location.origin
+    if (origin === '' || origin === 'null') return ''
+    const search = new URL(fresh).search
+    if (search === '') return ''
+    return origin + '/' + search
+  } catch {
+    return ''
+  }
+}
+
+/**
  * Ask the host whether this page still authenticates, and remember the answer.
  *
  * Never throws: an unreachable host is "unknown", not "unauthenticated". When
- * the answer is 401 the host's *current* token URL is fetched from the
- * cookie-free plugin route so the page can offer a working link.
+ * the answer is 401, this page swaps the host's *current* launch token for a
+ * cookie in place — no navigation — so a restart ends with the tab back on
+ * screen instead of an address the user has to copy. Only a 401 that survives
+ * that exchange falls back to the clickable link.
  *
  * @returns true when the page is usable (authenticated or unknown).
  */
@@ -286,6 +322,8 @@ export async function checkAuth(): Promise<boolean> {
   // A restart in flight means the host is down, not that the cookie is bad.
   if (verdict === 'unknown' && state.phase !== 'idle') return true
   if (verdict !== 'unauthorized') {
+    // Authenticated again: a later restart may heal this tab once more.
+    if (verdict === 'authenticated') authExchangeTried = false
     if (state.authRequired) {
       stopAuthTicker()
       setState({ authRequired: false, authUrl: '' })
@@ -294,9 +332,22 @@ export async function checkAuth(): Promise<boolean> {
   }
   const payload = await api.authUrl()
   const fresh = payload?.authUrl ?? ''
+  const local = tokenUrlOnThisOrigin(fresh)
+  if (local !== '' && !authExchangeTried) {
+    authExchangeTried = true
+    if ((await api.exchangeToken(local)) && (await api.checkIndex()) === 'authenticated') {
+      // The cookie is back: a later restart may heal this tab once more.
+      authExchangeTried = false
+      if (state.authRequired) {
+        stopAuthTicker()
+        setState({ authRequired: false, authUrl: '' })
+      }
+      return true
+    }
+  }
   setState({
     authRequired: true,
-    authUrl: fresh !== '' ? fresh : state.authUrl,
+    authUrl: local !== '' ? local : fresh !== '' ? fresh : state.authUrl,
   })
   startAuthTicker()
   return false

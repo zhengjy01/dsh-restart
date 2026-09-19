@@ -9,10 +9,12 @@
  *      A persisted "启动失败" whose host is already answering must be cleared
  *      on mount, not resurrected. An in-flight failure must also clear itself
  *      the moment the host answers again.
- *   B. 命中 401 → 用新 token 地址打开
- *      When the host's index answers 401, the page must fetch this process's
- *      current token URL from the cookie-free plugin route and expose it,
- *      instead of navigating into the plain-text 401 page.
+ *   B. 命中 401 → 原地换回 cookie（换不到才给链接）
+ *      When the host's index answers 401, the page must swap this process's
+ *      current token for a cookie **in place** (same authority, no navigation)
+ *      and only reload once the tab really authenticates. If even that fails it
+ *      exposes the clickable URL — it must never navigate into the plain-text
+ *      401 page.
  *
  * Run `npm run build` first: the suite exercises lib/client.js, not src/.
  */
@@ -80,6 +82,8 @@ const scenario = {
   /** Index status: 200 (cookie good) | 401 (stale token) | 303. */
   index: 200,
   authUrl: 'http://127.0.0.1:3080/?token=FRESH',
+  /** true when the token URL mints a cookie (its 303 lands), false when it fails. */
+  mint: true,
   /** 'ok' | 'down' */
   restart: 'ok',
 }
@@ -132,6 +136,14 @@ globalThis.fetch = async (input, init = {}) => {
       oldPid: 4321,
     })
   }
+  if (url === 'http://127.0.0.1:3080/?token=FRESH') {
+    // The in-place exchange: the host answers 303 with Set-Cookie. `mint: false`
+    // models a host that cannot issue one, so the heal must give up quietly.
+    if (!scenario.mint) throw new TypeError('fetch failed')
+    fetchCalls.push({ url, method: init.method ?? 'GET' })
+    scenario.index = 200
+    return new Response(null, { status: 303, headers: { location: '/' } })
+  }
   if (url === '/' && (init.method ?? 'GET') === 'HEAD') {
     return new Response(null, { status: scenario.index })
   }
@@ -160,6 +172,7 @@ async function reset() {
   scenario.probe = 'up'
   scenario.index = 200
   scenario.restart = 'ok'
+  scenario.mint = true
   await t.checkAuth() // clears the 401 ticker when authenticated
   storage.removeItem(pendingKey)
   reloads = 0
@@ -209,12 +222,15 @@ await sleep(900) // the reload is deliberately deferred
 check('then reloads itself to load the new code', reloads === 1, String(reloads))
 await reset()
 
-// --- B. 命中 401 → 用新 token 地址打开 --------------------------------------------
+// --- B. 命中 401 → 原地换回 cookie ------------------------------------------------
 
-console.log('\nB. 命中 401 → 用新 token 地址打开')
+console.log('\nB. 命中 401 → 原地换回 cookie（换不到才给链接）')
 
+// B1. The exchange itself fails (no provider, network hiccup): the page must stay
+// put and offer the address, never navigate into the host's plain-text 401.
 scenario.probe = 'up'
 scenario.index = 401
+scenario.mint = false
 scenario.authUrl = 'http://127.0.0.1:3080/?token=FRESH'
 await t.resumeIfPending()
 check('a 401 index marks the page as unauthenticated', t.getState().authRequired === true)
@@ -222,27 +238,43 @@ check('the current process token URL is fetched from the cookie-free route', t.g
 check('and the page does NOT navigate into the 401', reloads === 0, String(reloads))
 await reset()
 
-// The combined case: host recovers, but this tab's cookie is gone.
+// B2. The exchange succeeds: the tab heals itself, with nothing to copy.
+scenario.index = 401
+scenario.mint = true
+await t.checkAuth()
+check('a mintable token re-authenticates the tab in place', t.getState().authRequired === false, String(t.getState().authRequired))
+check('the heal mints the cookie without navigating', reloads === 0, String(reloads))
+check(
+  'the exchange is sent to this tab\u2019s own authority',
+  fetchCalls.some((call) => call.url === 'http://127.0.0.1:3080/?token=FRESH' && call.method === 'GET'),
+  JSON.stringify(fetchCalls),
+)
+await reset()
+
+// B3. The combined case: host recovers from a restart while this tab's cookie is gone.
 storage.setItem(pendingKey, JSON.stringify({ phase: 'waiting', startedAt: Date.now(), fallbackUrl: '', port: 3080 }))
 scenario.probe = 'down'
+scenario.index = 401
 await t.resumeIfPending()
 check('an in-flight restart is resumed while the host is down', t.getState().phase === 'waiting', t.getState().phase)
 scenario.probe = 'up'
-scenario.index = 401
 await t.checkNow()
 check('a recovered host still reports ready', t.getState().phase === 'ready', t.getState().phase)
-check('but the stale-token page is flagged for re-authentication', t.getState().authRequired === true)
-check('the note explains the 401 and points at the new address', t.getState().note.includes('401'), t.getState().note)
-check('a reload is withheld (it would land on the plain-text 401 page)', reloads === 0, String(reloads))
+check('the tab is authenticated again without a copy step', t.getState().authRequired === false)
+await sleep(900)
+check('so the page reloads itself back to the app', reloads === 1, String(reloads))
+
+// B4. A heal that cannot work falls back to the clickable address, and a manual
+// click-through still clears the flag once the cookie is valid again.
+await reset()
+scenario.index = 401
+scenario.mint = false
+await t.checkAuth()
 check(
-  'the fresh token URL is offered for the click-through',
-  t.getState().authUrl === 'http://127.0.0.1:3080/?token=FRESH',
+  'a failed heal falls back to the clickable address',
+  t.getState().authRequired === true && t.getState().authUrl.includes('token='),
   t.getState().authUrl,
 )
-await sleep(900) // give a wrongly scheduled reload time to fire, so 0 is meaningful
-check('a reload is still withheld after the deferred window', reloads === 0, String(reloads))
-
-// Recovery: the token URL was opened (cookie minted) and the page authenticates.
 scenario.index = 200
 await t.checkAuth()
 check('once the cookie is valid again the 401 flag clears', t.getState().authRequired === false)

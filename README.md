@@ -50,10 +50,13 @@ left. `dsh-restart` handles all three:
   host is back (or launchd rescued it) the page clears that leftover "boot
   failed" text by itself — it keeps probing a failed state, re-checks on focus,
   and drops a persisted failure the moment the host answers.
-- Fresh-token guidance: every `dsh web` boot mints a new launch token, so an old
-  tab's URL is refused with 401 once its cookie is gone. The page detects that
-  and offers a clickable **「用新 token 地址打开」** link built from the current
-  process's token, instead of reloading into the host's plain-text 401 page.
+- Fresh-token self-heal: every `dsh web` boot mints a new launch token, so an old
+  tab's URL is refused with 401 once its cookie is gone. The page then swaps the
+  current process's token for a cookie **in place** (same authority as the tab,
+  no navigation) and reloads only after the tab really authenticates — a restart
+  ends with the app back on screen, not with an address to copy. If even that
+  fails it falls back to the clickable **「用新 token 地址打开」** link, so a dead
+  cookie can never turn a reload into the host's plain-text 401 page.
 - History at `~/.dsh/dsh-restart/history.json`; logs under
   `~/.dsh/dsh-restart/logs/`; config at `~/.dsh/dsh-restart.json` (0600).
 

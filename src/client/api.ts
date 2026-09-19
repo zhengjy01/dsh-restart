@@ -281,6 +281,37 @@ export class RestartApi {
     }
   }
 
+  /**
+   * Exchange a launch-token URL for a browser cookie **without navigating**.
+   *
+   * The host answers `/?token=…` with a 303 that carries `Set-Cookie`. Sending
+   * that request with `redirect: 'manual'` lets the browser store the cookie
+   * while the page stays put, so a failing exchange can never dump the tab onto
+   * the host's plain-text 401 page — the caller re-checks and decides.
+   *
+   * @param target same-authority token URL (see `tokenUrlOnThisOrigin`).
+   * @returns true when the host answered the exchange at all.
+   */
+  async exchangeToken(target: string, timeoutMs = 3_000): Promise<boolean> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await fetch(target, {
+        method: 'GET',
+        redirect: 'manual',
+        cache: 'no-store',
+        credentials: 'same-origin',
+        signal: controller.signal,
+      })
+      // A redirect the page does not follow surfaces as an opaque redirect (status 0).
+      return response.type === 'opaqueredirect' || (response.status >= 200 && response.status < 400)
+    } catch {
+      return false
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   /** Ask for a restart; the host answers before it exits. */
   async restart(reason: string, source = 'web'): Promise<RestartAck> {
     return request<RestartAck>(
