@@ -1,6 +1,6 @@
 {
   "name": "@zhengjunyao/dsh-restart",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "One-click restart for DeepSeek Harness: a web button (plus a dsh_restart agent tool) hands the relaunch to a detached helper that waits for the port to free, relaunches the exact same command, streams the new host's output, auto-reconnects the page — and shows the boot errors in a recovery console when the new host dies",
   "type": "module",
   "main": "lib/index.js",
