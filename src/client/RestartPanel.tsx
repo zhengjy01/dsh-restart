@@ -20,7 +20,7 @@ import {
   type RestartConfig,
   type StatusPayload,
 } from './api.ts'
-import { refreshConfig, startRestart, useRestartState } from './state.ts'
+import { checkAuth, refreshConfig, startRestart, useRestartState } from './state.ts'
 
 /** Module-level API client (stateless; the component closes over it). */
 const api = new RestartApi()
@@ -210,8 +210,12 @@ export function RestartPanel(props: { variant?: 'settings' | 'floating'; onClose
       setError('')
       const tail = await api.logs('latest', Math.max(60, next.config.logLines))
       setLogs(tail)
+      // Cheap HEAD /: catch an expired cookie while the panel is open, so the
+      // fresh-token link appears before a reload lands on the 401 page.
+      void checkAuth()
     } catch (caught) {
       setError(caught instanceof RestartApiError ? caught.message : String(caught))
+      if (caught instanceof RestartApiError && caught.unauthorized) void checkAuth()
     } finally {
       setBusy(false)
     }
@@ -219,6 +223,8 @@ export function RestartPanel(props: { variant?: 'settings' | 'floating'; onClose
 
   useEffect(() => {
     void load()
+    // A page that lost its launch token must surface the fresh URL right away.
+    void checkAuth()
     // Keep the "宿主" facts fresh, but do not fight the reconnect loops.
     const timer = setInterval(() => {
       if (live.phase === 'idle') void load()
@@ -384,13 +390,61 @@ export function RestartPanel(props: { variant?: 'settings' | 'floating'; onClose
       <div style={s.head}>
         <span style={{ ...s.dot, background: error !== '' ? DANGER : restarting ? '#e0a13a' : OK }} />
         <h3 style={s.title}>重启 DSH</h3>
-        <span style={s.badge}>{live.phase === 'idle' ? '空闲' : PHASE_LABEL[live.phase] ?? live.phase}</span>
+        <span style={s.badge}>
+          {live.authRequired ? '登录失效' : live.phase === 'idle' ? '空闲' : PHASE_LABEL[live.phase] ?? live.phase}
+        </span>
         {props.onClose !== undefined ? (
           <button type="button" style={s.button} onClick={props.onClose}>
             收起
           </button>
         ) : null}
       </div>
+
+      {live.authRequired ? (
+        <div style={{ ...s.section, borderTop: 'none', border: '1px solid ' + DANGER, borderRadius: '8px', padding: '10px 12px' }}>
+          <div style={s.error}>本页面已失去登录（401）：旧标签页的 launch token 已失效</div>
+          <div style={s.muted}>
+            每次 dsh web 启动都会更换 launch token；cookie 仍有效时重开站点即可。请用当前进程的新地址打开：
+          </div>
+          {live.authUrl !== '' ? (
+            <a
+              href={live.authUrl}
+              target="_top"
+              rel="noreferrer"
+              style={{ color: ACCENT, fontWeight: 600, wordBreak: 'break-all', fontSize: '12px' }}
+            >
+              用新 token 地址打开
+            </a>
+          ) : (
+            <div style={s.muted}>正在读取新地址…（也可在终端查看 dsh web 打印的 URL）</div>
+          )}
+          {live.authUrl !== '' ? (
+            <div style={{ ...s.value, fontFamily: 'ui-monospace, Menlo, monospace', fontSize: '11.5px' }}>
+              {live.authUrl}
+            </div>
+          ) : null}
+          <div style={s.row}>
+            <button
+              type="button"
+              style={s.button}
+              onClick={() => {
+                void copyText(live.authUrl).then((ok) => setNotice(ok ? '已复制新地址' : '复制失败'))
+              }}
+            >
+              复制新地址
+            </button>
+            <button
+              type="button"
+              style={s.button}
+              onClick={() => {
+                void checkAuth()
+              }}
+            >
+              重新检测登录
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <div style={s.grid}>
         <span style={s.label}>宿主</span>
@@ -422,7 +476,7 @@ export function RestartPanel(props: { variant?: 'settings' | 'floating'; onClose
         </span>
       </div>
 
-      {restarting || live.phase === 'failed' ? (
+      {restarting || live.phase === 'failed' || (live.phase === 'idle' && live.note !== '') ? (
         <div style={live.phase === 'failed' ? s.error : s.muted}>
           {live.note}
           {live.phase === 'failed' && live.error !== '' ? `｜${live.error}` : ''}

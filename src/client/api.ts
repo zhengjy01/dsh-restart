@@ -112,6 +112,8 @@ export interface StatusPayload {
   configExists: boolean
   statusFile: string
   consoleUrl: string
+  /** This process's fresh launch-token URL (stale-tab 401 recovery). */
+  authUrl?: string
   history: RestartRecord[]
   logFiles: { name: string; file: string; size: number; mtime: string }[]
 }
@@ -136,6 +138,36 @@ export interface ProbePayload {
   uptimeMs: number
 }
 
+/** GET /api/dsh-restart/auth. */
+export interface AuthPayload {
+  ok: boolean
+  /** This process's URL carrying its current launch token ('' when unknown). */
+  authUrl: string
+  /** Plain origin, used when the token URL is unavailable. */
+  origin: string
+  port: number
+  pid: number
+}
+
+/** Result of asking the host whether this page is still authenticated. */
+export type IndexAuth = 'authenticated' | 'unauthorized' | 'unknown'
+
+/**
+ * Classify a same-origin index request into an authentication verdict.
+ *
+ * 401 is the host's plain-text "authentication required" — the page's token is
+ * stale and only the freshly printed token URL can mint a new cookie. A 303/200
+ * (or an opaque redirect under `redirect: 'manual'`) means the cookie is good.
+ * Anything else is treated as unknown so a non-`dsh web` deployment is never
+ * pushed into the 401 recovery path.
+ */
+export function classifyIndexAuth(response: { status: number; type?: string }): IndexAuth {
+  if (response.status === 401) return 'unauthorized'
+  if (response.status === 0 || response.type === 'opaqueredirect') return 'authenticated'
+  if (response.status >= 200 && response.status < 400) return 'authenticated'
+  return 'unknown'
+}
+
 /** POST /api/dsh-restart/restart. */
 export interface RestartAck {
   ok: boolean
@@ -156,6 +188,11 @@ export class RestartApiError extends Error {
   constructor(message: string, readonly status = 0) {
     super(message)
     this.name = 'RestartApiError'
+  }
+
+  /** True when the host rejected the request as unauthenticated (stale token). */
+  get unauthorized(): boolean {
+    return this.status === 401
   }
 }
 
@@ -201,6 +238,47 @@ export class RestartApi {
   /** Liveness probe used while reconnecting (short timeout, tiny body). */
   async probe(timeoutMs = 2_500): Promise<ProbePayload> {
     return request<ProbePayload>('/api/dsh-restart/probe', {}, timeoutMs)
+  }
+
+  /**
+   * This process's fresh launch-token URL.
+   *
+   * Reachable without a cookie on purpose: the page that needs it is the one
+   * whose token just went stale. Never throws — a missing URL degrades to ''.
+   */
+  async authUrl(timeoutMs = 2_500): Promise<AuthPayload | null> {
+    try {
+      return await request<AuthPayload>('/api/dsh-restart/auth', {}, timeoutMs)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Does this page still authenticate against the host's index?
+   *
+   * A `HEAD /` is the cheapest honest answer: the host serves the index to an
+   * authenticated request and answers a bare 401 otherwise. `redirect: 'manual'`
+   * matters — a 303 (token exchanged for a cookie) surfaces as an opaque
+   * redirect rather than being followed into an 11 MB HTML download.
+   */
+  async checkIndex(timeoutMs = 3_000): Promise<IndexAuth> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await fetch('/', {
+        method: 'HEAD',
+        redirect: 'manual',
+        cache: 'no-store',
+        credentials: 'same-origin',
+        signal: controller.signal,
+      })
+      return classifyIndexAuth(response)
+    } catch {
+      return 'unknown'
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   /** Ask for a restart; the host answers before it exits. */

@@ -52,6 +52,13 @@
   助手阶段与失败原因、最近重启记录、上次启动日志里的疑似报错行）、
   `dsh_restart`（真正重启；**必须已获得用户同意**并传 `confirm: true`，
   否则只返回提示不执行）。
+- **旧标签页自愈**：重启失败态只存在于页面（内存 + sessionStorage），所以宿主恢复后
+  （自己起来的、或 launchd 救回来的）残留的「启动失败」文案必须自己消失——页面在失败态
+  持续探测、标签页重新获得焦点时立刻复查、宿主一应答就丢掉持久化的失败记录，不需要用户刷新。
+- **401 新地址引导**：每次 `dsh web` 启动都换一个 launch token，旧标签页 URL 里的旧
+  token 在 cookie 失效时会被 401 拒。页面会 `HEAD /` 检出 401，并从**免 cookie 的插件路由**
+  取回本进程当前的 token 地址，给出可点击的**「用新 token 地址打开」**，而不是让页面刷新后
+  落进宿主的纯文本 401 页。
 - **重启历史**：`~/.dsh/dsh-restart/history.json` 记录每次重启的时间、来源、原因、
   新旧 pid 与日志路径。
 
@@ -109,6 +116,7 @@ dsh plugin --profile web add github:zhengjy01/dsh-restart
 | --- | --- | --- |
 | GET | `/api/dsh-restart/status` | 宿主 + 助手 + 配置 + 历史 |
 | GET | `/api/dsh-restart/probe` | 极小存活探针（重连时高频轮询） |
+| GET | `/api/dsh-restart/auth` | 本进程当前 launch token 地址（**故意不要求 cookie**，仍是 loopback-only） |
 | POST | `/api/dsh-restart/restart` | 交接重启，先回 202 再退出本进程 |
 | GET | `/api/dsh-restart/logs` | 启动日志尾部 + 疑似报错行 |
 | GET | `/api/dsh-restart/history` | 重启记录 |
@@ -146,7 +154,7 @@ dsh plugin --profile web add github:zhengjy01/dsh-restart
 ## 测试
 
 ```sh
-pnpm test        # 168 项断言，五个套件
+pnpm test        # 208 项断言，六个套件
 ```
 
 - `tests/smoke.mjs` — 配置读写与钳制、历史、日志尾部与报错识别、启动签名、宿主信息；
@@ -155,12 +163,16 @@ pnpm test        # 168 项断言，五个套件
   宿主应答端口后才在插件上崩掉（不得报就绪，且要撤回已报的就绪状态、写入失败报告）、
   应答端口后静默退出（没有任何报错行也要靠存活性判失败）、健康宿主打印错误形状的噪音
   （不得误判为失败）；
-- `tests/routes.mjs` — 合成的 req/res 打全部路由，含 loopback/跨站/方法守卫；
+- `tests/routes.mjs` — 合成的 req/res 打全部路由，含 loopback/跨站/方法守卫，以及
+  「`connection` 服务 → `/auth` 新 token 地址」的装配（无该服务时回落纯 origin）；
 - `tests/handoff.mjs` — 端到端：假宿主进程 → POST 重启 → 旧进程真的退出 →
   助手用相同命令拉起第二代 → 端口重新应答（新 pid）、`restarted: true`、历史落盘；
 - `tests/launchd.mjs` — launchd 识别（**按 pid 匹配 `launchctl list`**，因为 Node 会把
   `XPC_SERVICE_NAME` 改写成 `0`）+ observe 模式（助手执行 kickCommand、跟随托管方日志、
-  **绝不自己 spawn**），以及托管宿主日志出现 boot 致命行时不得报就绪。
+  **绝不自己 spawn**），以及托管宿主日志出现 boot 致命行时不得报就绪；
+- `tests/selfheal.mjs` — 用桩替换 sessionStorage/location/fetch，驱动**真实的浏览器 bundle**：
+  「构造失败态 → 宿主恢复 → 页面自愈」（挂载即清掉宿主已恢复的失败记录；失败的重启请求在
+  宿主应答后自动离开失败态并刷新）与「命中 401 → 取回当前 token 地址、且不刷新进 401 页」。
 
 ## 边界
 

@@ -19,6 +19,14 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { mountRestartEntry } from './floating.tsx'
 import { mountRestartOverlay } from './overlay.tsx'
 import { RestartPanel } from './RestartPanel.tsx'
+import * as restartState from './state.ts'
+
+/**
+ * Test seam: `tests/selfheal.mjs` loads the built browser bundle with stubbed
+ * globals and drives this real state machine — a regression for "failed state →
+ * host recovers → the page heals itself". Nothing in the browser imports it.
+ */
+export { restartState as __test }
 
 /** Required services. */
 export const inject = ['slots']

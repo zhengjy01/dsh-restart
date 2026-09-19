@@ -52,7 +52,7 @@
     "build": "tsc -p tsconfig.build.json && tsdown",
     "bundle": "tsdown",
     "typecheck": "tsc --noEmit",
-    "test": "node tests/smoke.mjs && node tests/helper.mjs && node tests/routes.mjs && node tests/handoff.mjs && node tests/launchd.mjs",
+    "test": "node tests/smoke.mjs && node tests/helper.mjs && node tests/routes.mjs && node tests/handoff.mjs && node tests/launchd.mjs && node tests/selfheal.mjs",
     "verify": "node scripts/portability.mjs --health /api/dsh-restart/probe",
     "verify:quick": "node scripts/portability.mjs --skip-audit --stability 5 --health /api/dsh-restart/probe",
     "prepare": "npm run build",

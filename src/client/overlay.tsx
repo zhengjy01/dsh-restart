@@ -17,6 +17,7 @@ import { fetchHelperReport } from './api.ts'
 import {
   checkNow,
   dismiss,
+  installSelfHealWatchers,
   retryBoot,
   resumeIfPending,
   useRestartState,
@@ -60,6 +61,10 @@ const CSS = [
   '#dsh-restart-overlay-root .dshrst-steps{display:flex;gap:6px;flex-wrap:wrap;font-size:12px}',
   '#dsh-restart-overlay-root .dshrst-step{padding:2px 9px;border-radius:999px;border:1px solid rgba(128,128,128,.28)}',
   '#dsh-restart-overlay-root .dshrst-step.on{border-color:' + ACCENT + ';color:' + ACCENT + '}',
+  '#dsh-restart-overlay-root .dshrst-auth{display:flex;flex-direction:column;gap:6px;padding:10px 12px;',
+  'border-radius:8px;border:1px solid rgba(192,57,43,.5);background:rgba(192,57,43,.08)}',
+  '#dsh-restart-overlay-root .dshrst-auth a{color:' + ACCENT + ';font-weight:600;word-break:break-all}',
+  '#dsh-restart-overlay-root .dshrst-auth code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}',
 ].join('')
 
 /** Inject the overlay stylesheet once. */
@@ -91,6 +96,7 @@ function stepIndex(state: RestartState): number {
 
 /** Title for the overlay header. */
 function titleOf(state: RestartState): string {
+  if (state.authRequired) return 'DSH 登录已失效（旧 token）'
   if (state.phase === 'requesting') return '正在重启 DSH…'
   if (state.phase === 'waiting') return '正在重启 DSH…'
   if (state.phase === 'ready') return 'DSH 已就绪'
@@ -112,7 +118,8 @@ function Overlay() {
   const [copied, setCopied] = useState(false)
 
   const visible =
-    state.phase !== 'idle' && (state.config === null || state.config.showOverlay !== false)
+    state.authRequired ||
+    (state.phase !== 'idle' && (state.config === null || state.config.showOverlay !== false))
 
   const tail = useMemo(() => {
     const lines = state.helper?.tail ?? []
@@ -135,6 +142,16 @@ function Overlay() {
   const active = stepIndex(state)
   const errorText = state.error !== '' ? state.error : state.helper?.failure?.message ?? ''
   const exit = state.helper?.childExit
+  const authUrl = state.authUrl
+  const copyAuthUrl = async (): Promise<void> => {
+    if (authUrl === '') return
+    try {
+      await navigator.clipboard?.writeText(authUrl)
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }
   const copy = async (): Promise<void> => {
     // Prefer the helper's own report: it carries the exit code, the detected
     // error lines and the raw boot output in one paste-ready document.
@@ -172,29 +189,51 @@ function Overlay() {
     <div className="dshrst-mask">
       <div className="dshrst-card">
         <div className="dshrst-head">
-          {state.phase === 'ready' ? null : (
+          {state.phase === 'ready' || state.authRequired ? null : (
             <span className="dshrst-spin" style={state.phase === 'failed' ? { borderTopColor: DANGER } : undefined} />
           )}
           <strong style={{ fontSize: 15 }}>{titleOf(state)}</strong>
-          <span className="dshrst-muted" style={{ marginLeft: 'auto' }}>
-            已等待 {human(state.elapsedMs)}
-          </span>
+          {state.phase === 'idle' ? null : (
+            <span className="dshrst-muted" style={{ marginLeft: 'auto' }}>
+              已等待 {human(state.elapsedMs)}
+            </span>
+          )}
         </div>
 
         <div className="dshrst-body">
-          <div className="dshrst-steps">
-            {STEPS.map((step, index) => (
-              <span
-                key={step.key}
-                className={'dshrst-step' + (index <= active ? ' on' : '')}
-                style={state.phase === 'failed' && index === active ? { borderColor: DANGER, color: DANGER } : undefined}
-              >
-                {step.label}
-              </span>
-            ))}
-          </div>
+          {state.phase === 'idle' ? null : (
+            <div className="dshrst-steps">
+              {STEPS.map((step, index) => (
+                <span
+                  key={step.key}
+                  className={'dshrst-step' + (index <= active ? ' on' : '')}
+                  style={state.phase === 'failed' && index === active ? { borderColor: DANGER, color: DANGER } : undefined}
+                >
+                  {step.label}
+                </span>
+              ))}
+            </div>
+          )}
 
           <div className="dshrst-muted">{state.note}</div>
+
+          {state.authRequired ? (
+            <div className="dshrst-auth">
+              <strong>本页面已失去登录（401）</strong>
+              <div className="dshrst-muted">
+                每次 dsh web 启动都会更换 launch token，旧标签页 URL 里的旧 token 会被拒绝；
+                cookie 仍有效时也可直接重开站点。请用下面这个当前进程的新地址打开：
+              </div>
+              {authUrl !== '' ? (
+                <a href={authUrl} target="_top" rel="noreferrer">
+                  用新 token 地址打开
+                </a>
+              ) : (
+                <span className="dshrst-muted">正在读取新地址…（也可在终端查看 `dsh web` 打印的 URL）</span>
+              )}
+              {authUrl !== '' ? <code>{authUrl}</code> : null}
+            </div>
+          ) : null}
 
           {errorText !== '' ? <div className="dshrst-err">{errorText}</div> : null}
 
@@ -213,7 +252,23 @@ function Overlay() {
           </div>
 
           <div className="dshrst-actions">
-            {state.phase === 'ready' ? (
+            {state.authRequired && authUrl !== '' ? (
+              <>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => {
+                    location.href = authUrl
+                  }}
+                >
+                  用新 token 地址打开
+                </button>
+                <button type="button" onClick={() => void copyAuthUrl()}>
+                  {copied ? '已复制' : '复制新地址'}
+                </button>
+              </>
+            ) : null}
+            {state.phase === 'ready' && !state.authRequired ? (
               <button type="button" className="primary" onClick={() => location.reload()}>
                 刷新页面
               </button>
@@ -234,7 +289,7 @@ function Overlay() {
             <button type="button" onClick={() => void copy()}>
               {copied ? '已复制' : '复制完整报告'}
             </button>
-            {state.phase === 'failed' || state.phase === 'ready' ? (
+            {state.phase === 'failed' || state.phase === 'ready' || state.authRequired ? (
               <button
                 type="button"
                 onClick={() => {
@@ -246,7 +301,7 @@ function Overlay() {
             ) : null}
           </div>
 
-          {state.phase !== 'failed' ? (
+          {state.phase !== 'failed' && !state.authRequired ? (
             <div className="dshrst-muted">
               重启期间这个页面会自动重连；新宿主一旦应答，页面会自动刷新加载新代码。
             </div>
@@ -274,6 +329,9 @@ export function mountRestartOverlay(): void {
   }
   root = createRoot(container)
   root.render(<Overlay />)
-  // Pick up a restart that was already in flight when this page loaded.
-  resumeIfPending()
+  // Re-check a failed page the moment the tab is looked at again.
+  installSelfHealWatchers()
+  // Pick up a restart that was already in flight when this page loaded; a
+  // leftover failure whose host is back is cleared instead of resurrected.
+  void resumeIfPending()
 }

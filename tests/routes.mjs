@@ -19,7 +19,7 @@ process.env.DSH_RESTART_HOME = HOME
 const TEST_FALLBACK_PORT = 3999
 await writeFile(path.join(HOME, 'config.json'), JSON.stringify({ fallbackPort: TEST_FALLBACK_PORT }))
 
-const { makeRoutes, RESTART_API, loadConfig, statusPath } = await import('../lib/index.js')
+const { apply, makeRoutes, RESTART_API, loadConfig, statusPath } = await import('../lib/index.js')
 
 let passed = 0
 let failed = 0
@@ -121,6 +121,38 @@ check('status exposes the config', status.json.config.fallbackPort === TEST_FALL
 check('status lists the endpoints', status.json.endpoints.restart === RESTART_API.restart)
 check('status has no live helper', status.json.helperAlive === false)
 check('status starts with empty history', Array.isArray(status.json.history) && status.json.history.length === 0)
+
+console.log('auth url (stale-tab 401 recovery)')
+
+const authRoute = await call(routes, RESTART_API.auth)
+check('auth route answers without a cookie', authRoute.status === 200 && authRoute.json.ok === true)
+check('auth route degrades to an empty URL with no provider', authRoute.json.authUrl === '', authRoute.json.authUrl)
+check('auth route echoes the origin', authRoute.json.origin === 'http://127.0.0.1:4321', authRoute.json.origin)
+check('auth route reports this process', authRoute.json.pid === process.pid)
+check('status carries the (absent) auth URL', status.json.authUrl === '', String(status.json.authUrl))
+
+// The provider must be read per request, never pinned at mount: `dsh web` mints
+// a new launch token on every boot, so a URL cached at mount would itself go stale.
+let liveToken = 'http://127.0.0.1:4321/?token=FIRST'
+const authRoutes = makeRoutes({
+  port: 4321,
+  host: '127.0.0.1',
+  url: 'http://127.0.0.1:4321',
+  authUrl: () => liveToken,
+})
+const firstAuth = await call(authRoutes, RESTART_API.auth)
+check('the current token URL is served', firstAuth.json.authUrl === liveToken, firstAuth.json.authUrl)
+liveToken = 'http://127.0.0.1:4321/?token=SECOND'
+const secondAuth = await call(authRoutes, RESTART_API.auth)
+check('a changed token is reflected immediately (not cached)', secondAuth.json.authUrl === liveToken, secondAuth.json.authUrl)
+const statusWithAuth = await call(authRoutes, RESTART_API.status)
+check('status also carries the current token URL', statusWithAuth.json.authUrl === liveToken, statusWithAuth.json.authUrl)
+check('the auth route is registered', RESTART_API.auth === '/api/dsh-restart/auth')
+
+const authForeign = await call(authRoutes, RESTART_API.auth, { remote: '10.0.0.5' })
+check('the auth route stays loopback-only', authForeign.status === 403, String(authForeign.status))
+const authPost = await call(authRoutes, RESTART_API.auth, { method: 'POST' })
+check('POST /auth is refused (405)', authPost.status === 405, String(authPost.status))
 
 console.log('logs + history + helper')
 
@@ -257,6 +289,55 @@ check('unknown keys are ignored, not fatal', badBody.status === 200)
 
 const reset = await call(routes, RESTART_API.config, { method: 'POST', body: { reset: true } })
 check('config reset restores defaults', reset.json.config.bootTimeoutMs === 120_000, String(reset.json.config.bootTimeoutMs))
+
+console.log('plugin wiring (connection → fresh token URL)')
+
+// The route must read the Web Connection service lazily, so `apply` is driven
+// with a fake context here — this is the only place the host half's wiring to
+// the launch-token provider is exercised without restarting a real host.
+{
+  const registered = []
+  const fakeCtx = (connection) => ({
+    webServer: {
+      port: 4321,
+      register: (route) => {
+        registered.push(route)
+        return () => {}
+      },
+    },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    effect: (fn) => {
+      fn()
+      return () => {}
+    },
+    get: (serviceName) => (serviceName === 'connection' ? connection : undefined),
+  })
+
+  apply(fakeCtx({ authenticatedUrl: (base) => `${base}/?token=WIRED` }), { announceToAgent: false })
+  const wiredAuth = await call(registered, RESTART_API.auth)
+  check(
+    'apply wires connection.authenticatedUrl into /auth',
+    wiredAuth.json.authUrl === 'http://127.0.0.1:4321/?token=WIRED',
+    wiredAuth.json.authUrl,
+  )
+  const wiredStatus = await call(registered, RESTART_API.status)
+  check('the token URL is also on /status', wiredStatus.json.authUrl === 'http://127.0.0.1:4321/?token=WIRED')
+
+  const fallbackRoutes = []
+  const fallbackCtx = fakeCtx(undefined)
+  fallbackCtx.webServer.register = (route) => {
+    fallbackRoutes.push(route)
+    return () => {}
+  }
+  apply(fallbackCtx, { announceToAgent: false })
+  const fallbackAuth = await call(fallbackRoutes, RESTART_API.auth)
+  check(
+    'without a Connection service the plain origin is offered',
+    fallbackAuth.json.authUrl === 'http://127.0.0.1:4321',
+    fallbackAuth.json.authUrl,
+  )
+}
 
 await rm(HOME, { recursive: true, force: true })
 

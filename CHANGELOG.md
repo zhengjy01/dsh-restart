@@ -4,6 +4,44 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-19
+
+### 新增 (Added)
+
+- **旧标签页自愈**：重启失败态只活在页面（内存 + sessionStorage），宿主恢复后不再需要
+  用户手动刷新——失败态会持续探测（watchdog）、标签页重新获得焦点/可见时立刻复查
+  （`visibilitychange` / `focus`），并在挂载时先问宿主：宿主已回答就丢掉持久化的失败记录，
+  绝不复活一段已经过期的「启动失败」文案。请求重启这一步本身失败（例如宿主正好在重启窗口）
+  也会进入探测循环，而不是停在下发失败上。
+- **401 新地址引导**：每次 `dsh web` 启动都会换一个 launch token，旧标签页 URL 里的旧
+  token 在 cookie 失效时被 401 拒。客户端现在用 `HEAD /` 检出 401，并通过新增的
+  `GET /api/dsh-restart/auth`（loopback-only、**故意免 cookie**）取回**本进程当前**的
+  token 地址，在遮罩与面板给出可点击的「用新 token 地址打开」+「复制新地址」；
+  自动刷新前会先做这一步预检，401 时不再导航进宿主的纯文本 401 页。
+- 宿主侧 `RouteContext` 新增可选的 `authUrl()` 提供者：由 `connection` 服务
+  （`authenticatedUrl`）lazily 产出当前 token 地址；无该服务的 headless profile 回落纯 origin。
+
+### 修复 (Fixed)
+
+- `probeOnce` 命中就绪后先判认证再决定是否 `location.reload()`，避免旧 token 页面刷新后
+  落进 401 纯文本页。
+- 失败态不再停止探测：`retryBoot` 重试失败、`startRestart` 下发失败都会重新排队探测，
+  失败探测间隔固定为 3s。
+
+### 测试 (Tests)
+
+- 新增 `tests/selfheal.mjs`：以桩替换 `sessionStorage` / `location` / `fetch`，驱动
+  **真实构建产物 `lib/client.js`**，覆盖「构造失败态 → 宿主恢复 → 页面自愈」与
+  「命中 401 → 给出当前 token 地址、且不刷新进 401 页」。
+- `tests/routes.mjs` 补 `/auth` 路由（免 cookie / loopback / 方法守卫、token 每次请求实时
+  读取而非缓存）与「`connection` 服务 → `/auth`」装配断言。测试升至 **208 项断言（6 套件）**。
+
+### 兼容性 (Compatibility)
+
+- DSH：`>=0.1.5-rc.1`
+- Node：`^22.19.0 || >=24.0.0`
+- DSH peer：^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.1 || ^0.1.5-rc.1
+
 ## [0.1.2] - 2026-09-13
 
 ### 修复 (Fixed)

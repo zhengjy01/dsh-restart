@@ -46,6 +46,14 @@ left. `dsh-restart` handles all three:
 - Agent tools: `dsh_restart_status` (read-only) and `dsh_restart`, which demands
   `confirm: true` because the local standing rule is that DSH is never restarted
   without explicit user consent.
+- Stale-tab recovery: a restart's failure state lives in the page, so once the
+  host is back (or launchd rescued it) the page clears that leftover "boot
+  failed" text by itself — it keeps probing a failed state, re-checks on focus,
+  and drops a persisted failure the moment the host answers.
+- Fresh-token guidance: every `dsh web` boot mints a new launch token, so an old
+  tab's URL is refused with 401 once its cookie is gone. The page detects that
+  and offers a clickable **「用新 token 地址打开」** link built from the current
+  process's token, instead of reloading into the host's plain-text 401 page.
 - History at `~/.dsh/dsh-restart/history.json`; logs under
   `~/.dsh/dsh-restart/logs/`; config at `~/.dsh/dsh-restart.json` (0600).
 
@@ -63,9 +71,11 @@ Restart `dsh web` once to load it — the last manual restart you need.
 ## HTTP surface
 
 All loopback-only, same-origin, matching the other `dsh-*` panels:
-`GET /status`, `GET /probe`, `POST /restart`, `GET /logs`, `GET /history`,
-`POST /config`, `GET /helper`, `POST /helper/retry` — all under
-`/api/dsh-restart/`.
+`GET /status`, `GET /probe`, `GET /auth`, `POST /restart`, `GET /logs`,
+`GET /history`, `POST /config`, `GET /helper`, `POST /helper/retry` — all under
+`/api/dsh-restart/`. `GET /auth` is intentionally cookie-free (still loopback
+only): the tab that needs the fresh token URL is the one whose token just went
+stale.
 
 ## How it works
 
@@ -97,15 +107,18 @@ panel / dsh_restart
 ## Tests
 
 ```sh
-pnpm test    # 168 assertions across five suites
+pnpm test    # 208 assertions across six suites
 ```
 
 `smoke` (config/history/log detection/host identity), `helper` (the real helper
 against fake hosts: crash capture + console + manual retry, and a successful
 relaunch), `routes` (synthetic req/res, including the loopback/cross-site/method
-guards), `handoff` (end-to-end on fake ports: restart → old process really exits
-→ helper relaunches generation 2 → the port answers with a new pid), `launchd`
-(pid→job matching and observe mode, which must never spawn).
+guards and the connection→token-URL wiring), `handoff` (end-to-end on fake ports:
+restart → old process really exits → helper relaunches generation 2 → the port
+answers with a new pid), `launchd` (pid→job matching and observe mode, which must
+never spawn), `selfheal` (the real browser bundle with stubbed globals: a
+persisted "boot failed" whose host recovered is cleared on mount, and a 401 page
+gets the current token URL instead of a dead reload).
 
 ## Limits
 

@@ -80,6 +80,28 @@ export function apply(ctx: Context, config?: Config): void {
     get url(): string {
       return `http://127.0.0.1:${this.port}`
     },
+    authUrl: connectionAuthUrl,
+  }
+
+  /**
+   * This process's fresh launch-token URL, or the plain origin as a fallback.
+   *
+   * `dsh web` mints a new token on every boot, so the URL printed at startup is
+   * the only address that can re-authenticate a tab whose cookie went stale.
+   * The Web Connection service owns it; read it lazily because the service is
+   * mounted alongside this plugin and is absent in headless profiles (where the
+   * plain origin — the best link available there — is returned instead).
+   */
+  function connectionAuthUrl(): string {
+    try {
+      const connection = ctx.get('connection') as { authenticatedUrl?: (base: string) => string } | undefined
+      if (connection !== undefined && typeof connection.authenticatedUrl === 'function') {
+        return connection.authenticatedUrl(endpoint.url)
+      }
+    } catch {
+      /* the Connection service is not mounted: fall through to the origin */
+    }
+    return endpoint.url
   }
 
   ctx.effect(

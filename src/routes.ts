@@ -6,6 +6,7 @@
  *
  *   GET  /status          host + live helper + config, plus the last restarts
  *   GET  /probe           tiny liveness probe the page polls while reconnecting
+ *   GET  /auth            this process's fresh token URL (stale-tab 401 recovery)
  *   POST /restart         hand the restart to the detached helper, then exit
  *   GET  /logs            boot-log tail (and the lines that look like errors)
  *   GET  /history         one record per requested restart
@@ -43,6 +44,7 @@ import {
 export const RESTART_API = {
   status: '/api/dsh-restart/status',
   probe: '/api/dsh-restart/probe',
+  auth: '/api/dsh-restart/auth',
   restart: '/api/dsh-restart/restart',
   logs: '/api/dsh-restart/logs',
   history: '/api/dsh-restart/history',
@@ -62,6 +64,16 @@ export interface RouteContext {
   host: string
   /** Base URL used in links and the helper spec. */
   url: string
+  /**
+   * This process's browser URL carrying its launch token.
+   *
+   * Every `dsh web` process mints a new token, so a tab opened before a restart
+   * holds a token the new host rejects with 401. The Web Connection service owns
+   * the current one; the plugin reads it lazily per request (the service may not
+   * exist at mount, and in headless profiles it never does — the plain origin is
+   * then the best link we can offer).
+   */
+  authUrl?: () => string
 }
 
 /** Strict loopback fence for every route (the panel is same-origin only). */
@@ -131,6 +143,11 @@ export interface RestartStatusPayload {
   statusFile: string
   /** Where the detached recovery console is reachable (after a restart). */
   consoleUrl: string
+  /**
+   * This process's fresh launch-token URL, so a tab whose token went stale can
+   * offer a working link instead of dying on the host's plain-text 401.
+   */
+  authUrl: string
   /** launchd job managing this host, when there is one. */
   launchd: { managed: boolean; label: string; state: string; logFile: string; strategy: string } | null
   /** Restarts requested through this plugin, newest first. */
@@ -170,6 +187,21 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
 
   const queryOf = (req: IncomingMessage): URLSearchParams =>
     new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
+
+  /**
+   * This process's fresh launch-token URL ('' when the provider refuses).
+   *
+   * Read per request, never cached: the token is minted by the running process
+   * and must never be pinned into a closure at mount.
+   */
+  const currentAuthUrl = (): string => {
+    try {
+      const value = deps.authUrl?.()
+      return typeof value === 'string' ? value : ''
+    } catch {
+      return ''
+    }
+  }
 
   const intParam = (params: URLSearchParams, key: string, fallback: number, min: number, max: number): number => {
     const raw = Number(params.get(key) ?? '')
@@ -253,6 +285,30 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
     },
     {
       kind: 'exact' as const,
+      path: RESTART_API.auth,
+      handler: (req: IncomingMessage, res: ServerResponse) => {
+        // Unauthenticated on purpose: the page that needs the fresh URL is
+        // exactly the one whose cookie/token just went stale, so it must be
+        // able to read this. Loopback-only + same-origin, like every route.
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        writeJson(res, 200, {
+          ok: true,
+          authUrl: currentAuthUrl(),
+          origin: deps.url,
+          port: deps.port,
+          pid: process.pid,
+        })
+      },
+    },
+    {
+      kind: 'exact' as const,
       path: RESTART_API.status,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'GET')) return
@@ -275,6 +331,7 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
           configExists: exists,
           statusFile: statusPath(),
           consoleUrl: `http://${deps.host}:${config.fallbackPort}`,
+          authUrl: currentAuthUrl(),
           launchd:
             job === null
               ? null
