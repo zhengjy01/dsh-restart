@@ -23,6 +23,13 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const HELPER = path.join(ROOT, 'helper', 'restart-helper.mjs')
+/**
+ * 替身主机自毁超时。这些替身是由**故意 detached** 的重启助手拉起的，助手一旦退出就会被
+ * reparent 到 launchd；如果测试的清理路径没走到，它们会永久占着端口（本机曾累积 36 个）。
+ * 任何测试都远跑不到这个时长，所以到点自尽只是一道安全网，不参与任何断言。
+ */
+const STANDIN_HOST_TTL_MS = 30 * 60 * 1000
+
 
 let passed = 0
 let failed = 0
@@ -174,7 +181,7 @@ console.log('B. observe mode')
   const kickCommand = [
     process.execPath,
     '-e',
-    `require('node:http').createServer((q,s)=>s.end('ok')).listen(${target},'127.0.0.1',()=>console.log('kicked host up'))`,
+    `require('node:http').createServer((q,s)=>s.end('ok')).listen(${target},'127.0.0.1',()=>console.log('kicked host up'));setTimeout(()=>process.exit(0),${STANDIN_HOST_TTL_MS})`,
   ]
   await writeFile(
     specFile,
@@ -267,7 +274,8 @@ console.log('C. observe mode withholds readiness on a fatal boot line')
     '-e',
     "const fs=require('node:fs');" +
       `require('node:http').createServer((q,s)=>s.end('ok')).listen(${target},'127.0.0.1',()=>{` +
-      `fs.appendFileSync(${JSON.stringify(observeLog)},'Error: dsh: plugin tree failed to load: timed out waiting for the writer lock\\n')})`,
+      `fs.appendFileSync(${JSON.stringify(observeLog)},'Error: dsh: plugin tree failed to load: timed out waiting for the writer lock\\n')})` +
+      `;setTimeout(()=>process.exit(0),${STANDIN_HOST_TTL_MS})`,
   ]
   await writeFile(
     specFile,

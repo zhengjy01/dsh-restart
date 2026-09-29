@@ -39,6 +39,7 @@ import {
   RestartApi,
   RestartApiError,
   type HelperStatus,
+  type PendingApproval,
   type RestartAck,
   type RestartConfig,
   type StatusPayload,
@@ -85,6 +86,18 @@ export interface RestartState {
   authRequired: boolean
   /** This process's fresh launch-token URL for {@link authRequired}. */
   authUrl: string
+  /**
+   * A restart an agent asked for and the user has not decided on yet.
+   *
+   * The panel renders this as the approval card: nothing happens to the host
+   * until the user picks a side, so this is the one place where a restart can
+   * still be refused.
+   */
+  approval: PendingApproval | null
+  /** True when the last filed request timed out without a decision. */
+  approvalExpired: boolean
+  /** True while an approve/deny request is in flight. */
+  approvalBusy: boolean
 }
 
 /** Storage key for resuming across a reload. */
@@ -128,12 +141,16 @@ let state: RestartState = {
   retrying: false,
   authRequired: false,
   authUrl: '',
+  approval: null,
+  approvalExpired: false,
+  approvalBusy: false,
 }
 
 const listeners = new Set<() => void>()
 let ticker: ReturnType<typeof setInterval> | null = null
 let prober: ReturnType<typeof setTimeout> | null = null
 let authTicker: ReturnType<typeof setInterval> | null = null
+let approvalTicker: ReturnType<typeof setInterval> | null = null
 let noticeTimer: ReturnType<typeof setTimeout> | null = null
 let probing = false
 let reconciling = false
@@ -519,6 +536,99 @@ export async function refreshConfig(): Promise<RestartConfig | null> {
       startAuthTicker()
     }
     return null
+  }
+}
+
+/**
+ * How often the panel asks whether an agent filed a restart request.
+ *
+ * Three seconds: fast enough that the approval card appears while the requesting
+ * agent's reply is still on screen, cheap enough to leave running.
+ */
+const APPROVAL_POLL_MS = 3_000
+
+/**
+ * Read the pending agent request (the gate's read side).
+ *
+ * Failures are swallowed: this poll runs while the host may be mid-restart, and
+ * the next tick is a better retry than an error banner.
+ */
+export async function loadApproval(): Promise<void> {
+  try {
+    const payload = await api.approval()
+    setState({ approval: payload.approval ?? null, approvalExpired: payload.expired === true })
+  } catch {
+    /* host unreachable or restarting; the next poll retries */
+  }
+}
+
+/** Start polling for pending agent requests (idempotent). */
+export function startApprovalWatch(intervalMs = APPROVAL_POLL_MS): void {
+  if (approvalTicker !== null) return
+  void loadApproval()
+  approvalTicker = setInterval(() => {
+    void loadApproval()
+  }, Math.max(1_000, intervalMs))
+}
+
+/** Stop the approval poll. */
+export function stopApprovalWatch(): void {
+  if (approvalTicker === null) return
+  clearInterval(approvalTicker)
+  approvalTicker = null
+}
+
+/**
+ * Turn the pending request into a restart — or refuse it.
+ *
+ * This is the only path from an agent's request to a restart, and it exists
+ * because the user clicked. Approving hands the host over exactly like the
+ * panel's own button: the state machine moves to `waiting` and the overlay
+ * follows the new process.
+ *
+ * @param decision - `approve` restarts, `deny` leaves the host untouched.
+ */
+export async function decidePending(decision: 'approve' | 'deny'): Promise<void> {
+  const pending = state.approval
+  if (pending === null || state.approvalBusy) return
+  setState({ approvalBusy: true })
+  // Grab the config while the host is still up; the reconnect needs it.
+  if (state.config === null) await refreshConfig().catch(() => null)
+  try {
+    const ack = await api.decideApproval(pending.id, decision)
+    if (decision === 'deny' || ack.denied === true) {
+      setState({ approval: null, approvalExpired: false, approvalBusy: false })
+      flashNote('已拒绝该重启请求：宿主保持运行。')
+      return
+    }
+    stopLoops()
+    setState({
+      approval: null,
+      approvalExpired: false,
+      approvalBusy: false,
+      phase: 'waiting',
+      startedAt: Date.now(),
+      elapsedMs: 0,
+      error: '',
+      ack: ack as RestartAck,
+      fallbackUrl: typeof ack.fallbackUrl === 'string' ? ack.fallbackUrl : '',
+      port: typeof ack.fallbackPort === 'number' ? ack.fallbackPort : 0,
+      logFile: typeof ack.logFile === 'string' ? ack.logFile : '',
+      source: 'user-approved',
+      reason: pending.reason,
+      reloadAt: null,
+      note: '已批准：旧进程正在退出，等待新宿主启动…（端口会先空约 3–5 秒；请勿手动刷新，本页会自己回来）',
+    })
+    persist()
+    startTicker()
+    scheduleProbe(1_000)
+  } catch (error) {
+    const message =
+      error instanceof RestartApiError ? error.message : String(error instanceof Error ? error.message : error)
+    setState({ approvalBusy: false })
+    // The request may have expired, or been decided in another tab.
+    await loadApproval()
+    flashNote((decision === 'deny' ? '拒绝失败：' : '批准失败：') + message)
   }
 }
 

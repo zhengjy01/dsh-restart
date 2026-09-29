@@ -2,9 +2,12 @@
  * Sidebar entry for dsh-restart.
  *
  * The restart control belongs next to the other plugin entries in the left
- * sidebar's settings area (`[class*="settingsArea"]`), not in a corner of its
- * own — my other plugins already mount there, so this entry joins their
- * horizontal row when it exists and creates the row when it does not.
+ * sidebar's settings area (`[class*="settingsArea"]`). That area is a VERTICAL
+ * block in the shell, so an entry appended straight to it takes a whole row of
+ * its own; every entry therefore shares ONE horizontal row
+ * (`.dsh-sidebar-row`), created by whichever entry mounts first and adopted by
+ * the rest — never keyed on another plugin's DOM, since a sibling plugin may
+ * simply not be installed.
  *
  * The button itself only opens the panel; the actual restart is the panel's
  * primary button, so a stray click in the sidebar can never kill the session.
@@ -35,15 +38,22 @@ const INLINE_CLASS = 'dshrst-inline'
 /** The settings area my other plugin entries mount into. */
 const SETTINGS_AREA_SELECTOR = '[class*="settingsArea"]'
 
-/** The WeChat bridge's ball — used to seed a shared row when no row exists yet. */
-const ANCHOR_BALL_SELECTOR = '.dshwx-ball'
+/** The shared footer row every sidebar entry converges on. */
+const ROW_CLASS = 'dsh-sidebar-row'
 
-/** Existing shared row (created by dsh-zhihu); reused when present. */
-const EXISTING_ROW_SELECTOR = '.dsh-zhihu-row'
+/** Any row a sibling plugin may have made — legacy names included, so a partial upgrade still merges. */
+const ROW_SELECTORS = ['.' + ROW_CLASS, '.dsh-zhihu-row', '.dshupd-row', '.dshrst-row']
 
-/** Row this plugin creates when nothing else provides one. */
-const ROW_CLASS = 'dshrst-row'
-const ROW_SELECTOR = '.' + ROW_CLASS
+/** The entries that belong in that row, in the order they should read. */
+const ROW_ENTRIES: ReadonlyArray<{ selector: string; order: number }> = [
+  { selector: '.dshwx-ball', order: 10 },
+  { selector: '#dsh-zhihu-floating-entry', order: 20 },
+  { selector: '#dsh-updater-entry', order: 30 },
+  { selector: '#dsh-restart-entry', order: 40 },
+]
+
+/** This entry's place in the row (fixed, so mount order never reshuffles it). */
+const ROW_ORDER = 40
 
 /** Debounce for the placement observer (ms). */
 const PLACEMENT_DEBOUNCE_MS = 250
@@ -59,12 +69,26 @@ const CSS = [
   'background:' + IDLE_COLOR + ';color:#fff;display:flex;align-items:center;justify-content:center;',
   'box-shadow:0 6px 20px rgba(43,108,176,.32);transition:transform .15s,background .2s}',
   '#dsh-restart-entry .dshrst-fab:hover{transform:scale(1.06)}',
-  '.' + ROW_CLASS + '{display:flex;align-items:center;justify-content:flex-start}',
+  // The shared row keeps every sidebar entry side by side inside the (vertical)
+  // settings area, instead of stacking them; it wraps only when it must.
+  '.' + ROW_CLASS + '{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-start;',
+  'gap:2px;flex:1 1 auto;min-width:0;box-sizing:border-box}',
+  // Inline placement: a plain 36px flex item sitting in that row.
   '#' + CONTAINER_ID + '.' + INLINE_CLASS + '{display:flex;align-items:center;flex:none}',
-  '#' + CONTAINER_ID + '.' + INLINE_CLASS + ' .dshrst-fab{position:static;width:36px;height:36px;',
-  'margin:0 0 0 8px;border-radius:8px;background:transparent;color:inherit;box-shadow:none;',
+  // `relative` (not `static`) so the pending badge has a positioning context.
+  // But the base rule above pins `right:24px;bottom:24px` for the floating ball,
+  // and on a *relative* box those two actually offset it — which shoved this
+  // sidebar entry 24px up and to the left, out of the row. Zero all four here;
+  // the ball keeps its own fixed inset because this rule does not match it.
+  '#' + CONTAINER_ID + '.' + INLINE_CLASS + ' .dshrst-fab{position:relative;',
+  'top:auto;right:auto;bottom:auto;left:auto;width:36px;height:36px;',
+  'margin:0;border-radius:8px;background:transparent;color:inherit;box-shadow:none;',
   'border:1px solid rgba(128,128,128,.35);opacity:.78;transition:opacity .15s,border-color .15s,color .2s}',
   '#' + CONTAINER_ID + '.' + INLINE_CLASS + ' .dshrst-fab:hover{opacity:1;border-color:rgba(128,128,128,.7);transform:none}',
+  // An agent's restart request has to be visible on the entry itself — the user
+  // must not have to open a panel to notice that something is waiting for them.
+  '#' + CONTAINER_ID + ' .dshrst-fab.dshrst-pending::after{content:"";position:absolute;top:-2px;right:-2px;',
+  'width:9px;height:9px;border-radius:50%;background:' + FAIL_COLOR + ';box-shadow:0 0 0 2px rgba(255,255,255,.9)}',
   '#' + CONTAINER_ID + ' .dshrst-spin{animation:dshrst-side-spin 1s linear infinite}',
   '@keyframes dshrst-side-spin{to{transform:rotate(360deg)}}',
   '#dsh-restart-entry .dshrst-pop{position:fixed;right:24px;bottom:86px;z-index:2147483001;',
@@ -125,7 +149,16 @@ function Entry(props: { mode: 'sidebar' | 'ball' }) {
   const live = useRestartState()
   const busy = live.phase === 'requesting' || live.phase === 'waiting'
   const failed = live.phase === 'failed'
-  const colour = failed ? FAIL_COLOR : busy ? BUSY_COLOR : undefined
+  /** An agent asked for a restart and the user has not decided yet. */
+  const pending = live.approval !== null
+  const colour = failed || pending ? FAIL_COLOR : busy ? BUSY_COLOR : undefined
+  const title = failed
+    ? 'DSH 重启失败 — 点击查看报错'
+    : pending
+      ? '有一个重启请求等你确认 — 点击查看'
+      : busy
+        ? 'DSH 正在重启…'
+        : '重启 DSH'
 
   return createElement(
     'div',
@@ -141,10 +174,10 @@ function Entry(props: { mode: 'sidebar' | 'ball' }) {
       'button',
       {
         type: 'button',
-        className: 'dshrst-fab',
+        className: pending ? 'dshrst-fab dshrst-pending' : 'dshrst-fab',
         style: colour === undefined ? undefined : { background: props.mode === 'ball' ? colour : undefined, color: props.mode === 'ball' ? '#fff' : colour },
-        title: failed ? 'DSH 重启失败 — 点击查看报错' : busy ? 'DSH 正在重启…' : '重启 DSH',
-        'aria-label': '重启 DSH',
+        title,
+        'aria-label': title,
         onClick: () => setOpen((value) => !value),
       },
       createElement(RestartIcon, { spinning: busy }),
@@ -155,6 +188,62 @@ function Entry(props: { mode: 'sidebar' | 'ball' }) {
 /** React root handle. */
 let root: Root | null = null
 
+/** Find the shared row, whichever plugin made it. */
+function findRow(area: Element): HTMLElement | null {
+  for (const selector of ROW_SELECTORS) {
+    const row = area.querySelector<HTMLElement>(selector)
+    if (row !== null) return row
+  }
+  return null
+}
+
+/**
+ * Put `container` into the shared footer row, creating the row when none exists.
+ *
+ * The shell's settings area is a vertical block, so an entry appended straight
+ * to it takes a whole row of its own. The row is what makes the entries read as
+ * one horizontal line, and creating it must not depend on any other plugin: a
+ * sibling entry may simply not be installed, and keying creation on the WeChat
+ * ball is what used to leave every entry stacked.
+ *
+ * Idempotent — it mutates only while something is out of place, so the
+ * placement observer settles instead of looping.
+ * @param container - this plugin's entry container.
+ * @param area - the sidebar's settings area.
+ */
+function joinRow(container: HTMLElement, area: HTMLElement): void {
+  let row = findRow(area)
+  if (row === null) {
+    row = document.createElement('div')
+    row.className = ROW_CLASS
+    row.dataset.plugin = 'dsh-sidebar-row'
+  } else {
+    // Normalise a row another plugin (or an older build) created, so the shared
+    // flex styling applies to it as well.
+    row.classList.add(ROW_CLASS)
+  }
+  // Fold duplicate rows into this one (two plugins can mount in the same tick),
+  // then adopt every known entry still parked in the vertical settings area.
+  for (const selector of ROW_SELECTORS) {
+    for (const other of Array.from(area.querySelectorAll<HTMLElement>(selector))) {
+      if (other === row) continue
+      for (const child of Array.from(other.children)) row.appendChild(child)
+      other.remove()
+    }
+  }
+  for (const entry of ROW_ENTRIES) {
+    for (const node of Array.from(area.querySelectorAll<HTMLElement>(entry.selector))) {
+      if (node.parentElement !== row) row.appendChild(node)
+      // Fixed order, so mount order and observer ticks never reshuffle the row.
+      node.style.order = String(entry.order)
+    }
+  }
+  if (container.parentElement !== row) row.appendChild(container)
+  container.style.order = String(ROW_ORDER)
+  // The row reads below the settings button, and has to be mounted.
+  if (row.parentElement !== area || area.lastElementChild !== row) area.appendChild(row)
+}
+
 /** Place the entry into the sidebar (or fall back to a fixed ball). */
 function place(container: HTMLElement, mode: 'sidebar' | 'ball'): void {
   if (mode === 'ball') {
@@ -162,29 +251,14 @@ function place(container: HTMLElement, mode: 'sidebar' | 'ball'): void {
     container.classList.remove(INLINE_CLASS)
     return
   }
-  const settingsArea = document.querySelector(SETTINGS_AREA_SELECTOR)
+  const settingsArea = document.querySelector<HTMLElement>(SETTINGS_AREA_SELECTOR)
   if (settingsArea === null) {
     if (container.parentElement !== document.body) document.body.appendChild(container)
     container.classList.remove(INLINE_CLASS)
     return
   }
-  let row: Element | null = document.querySelector(EXISTING_ROW_SELECTOR) ?? document.querySelector(ROW_SELECTOR)
-  const anchor = document.querySelector(ANCHOR_BALL_SELECTOR)
-  if (row === null && anchor !== null && anchor.parentElement !== null) {
-    // Reuse the existing flex row if another plugin made one; otherwise wrap the
-    // anchor so the entries sit side by side instead of stacking.
-    const parent = anchor.parentElement
-    if (parent === settingsArea || settingsArea.contains(parent)) {
-      const created = document.createElement('div')
-      created.className = ROW_CLASS
-      parent.insertBefore(created, anchor)
-      created.appendChild(anchor)
-      row = created
-    }
-  }
-  const target: Element = row ?? settingsArea
-  if (container.parentElement !== target) target.appendChild(container)
   container.classList.add(INLINE_CLASS)
+  joinRow(container, settingsArea)
 }
 
 /** Mount the sidebar entry (idempotent). */

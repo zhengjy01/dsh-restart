@@ -65,6 +65,22 @@ export interface RestartConfig {
   probeIntervalMs: number
   /** Restart records kept in history.json. */
   historyLimit: number
+  /**
+   * Agent-requested restarts need a human click to happen.
+   *
+   * When true (the default) `dsh_restart` never restarts anything by itself: it
+   * files a request that only the user can turn into a restart, by clicking
+   * 「批准并重启」 in the web panel. The panel's own button needs no approval —
+   * a human click *is* the approval. Turning this off restores the old
+   * "confirm and go" behaviour and is only for tests or an explicit user
+   * request: the standing local rule is that DSH is never restarted without the
+   * user's own, current consent.
+   */
+  requireApproval: boolean
+  /** How long an agent's pending restart request stays actionable. */
+  approvalTtlMinutes: number
+  /** Post a desktop notification when an agent files a restart request. */
+  notifyOnApproval: boolean
 }
 
 /** Shipped defaults. */
@@ -86,6 +102,9 @@ export const DEFAULT_CONFIG: RestartConfig = {
   showOverlay: true,
   probeIntervalMs: 1_200,
   historyLimit: 30,
+  requireApproval: true,
+  approvalTtlMinutes: 15,
+  notifyOnApproval: true,
 }
 
 /** One completed restart request, as rendered in the panel history list. */
@@ -188,6 +207,14 @@ export function normalizeConfig(patch: Partial<RestartConfig> | undefined, base 
     showOverlay: typeof source.showOverlay === 'boolean' ? source.showOverlay : base.showOverlay,
     probeIntervalMs: intIn(source.probeIntervalMs ?? base.probeIntervalMs, base.probeIntervalMs, 300, 30_000),
     historyLimit: intIn(source.historyLimit ?? base.historyLimit, base.historyLimit, 1, 500),
+    requireApproval: typeof source.requireApproval === 'boolean' ? source.requireApproval : base.requireApproval,
+    approvalTtlMinutes: intIn(
+      source.approvalTtlMinutes ?? base.approvalTtlMinutes,
+      base.approvalTtlMinutes,
+      1,
+      120,
+    ),
+    notifyOnApproval: typeof source.notifyOnApproval === 'boolean' ? source.notifyOnApproval : base.notifyOnApproval,
   }
 }
 

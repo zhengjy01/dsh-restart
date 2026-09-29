@@ -160,6 +160,16 @@ export {
   type RestartRecord,
 } from './config.ts'
 export {
+  approvalPath,
+  clearApproval,
+  createApproval,
+  decideApproval,
+  notifyApproval,
+  readApproval,
+  type ApprovalDecision,
+  type PendingApproval,
+} from './approval.ts'
+export {
   buildSpec,
   hostInfo,
   isAlive,

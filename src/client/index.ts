@@ -52,6 +52,14 @@ export function apply(ctx: ClientContext): void {
     console.warn('[dsh-restart] settings panel registration failed:', error)
   }
   try {
+    // Poll for agent-filed restart requests for the whole page life: a request
+    // has to reach the user wherever they are, not only when this panel happens
+    // to be open.
+    restartState.startApprovalWatch()
+  } catch (error) {
+    console.warn('[dsh-restart] approval watch failed to start:', error)
+  }
+  try {
     mountRestartOverlay()
   } catch (error) {
     console.warn('[dsh-restart] overlay mount failed:', error)

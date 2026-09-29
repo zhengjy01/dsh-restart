@@ -25,6 +25,13 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HELPER = fileURLToPath(new URL('../helper/restart-helper.mjs', import.meta.url))
+/**
+ * 替身主机自毁超时。这些替身是由**故意 detached** 的重启助手拉起的，助手一旦退出就会被
+ * reparent 到 launchd；如果测试的清理路径没走到，它们会永久占着端口（本机曾累积 36 个）。
+ * 任何测试都远跑不到这个时长，所以到点自尽只是一道安全网，不参与任何断言。
+ */
+const STANDIN_HOST_TTL_MS = 30 * 60 * 1000
+
 
 let passed = 0
 let failed = 0
@@ -191,7 +198,7 @@ console.log('B. successful boot')
   const logFile = path.join(HOME, 'success.log')
   const statusFile = path.join(HOME, 'success-status.json')
   const serverCode =
-    `require('node:http').createServer((q,s)=>{s.end('ok')}).listen(${target},'127.0.0.1',()=>console.log('fake host up'))`
+    `require('node:http').createServer((q,s)=>{s.end('ok')}).listen(${target},'127.0.0.1',()=>console.log('fake host up'));setTimeout(()=>process.exit(0),${STANDIN_HOST_TTL_MS})`
   const helperPid = await startHelper(HOME, {
     port: target,
     host: '127.0.0.1',
@@ -358,6 +365,7 @@ console.log('E. a healthy boot that prints error-shaped noise stays ready')
     "  console.error('[dsh-task-board] session/list failed; treating the roster as unknown')",
     "  console.error('Error: ECONNREFUSED while probing an optional provider')",
     "  console.log('fake host up')",
+    'setTimeout(()=>process.exit(0),' + STANDIN_HOST_TTL_MS + ')',
     '})',
   ].join('\n')
   const helperPid = await startHelper(HOME, {

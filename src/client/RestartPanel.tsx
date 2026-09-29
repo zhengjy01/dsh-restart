@@ -17,10 +17,20 @@ import {
   RestartApi,
   RestartApiError,
   type LogPayload,
+  type PendingApproval,
   type RestartConfig,
   type StatusPayload,
 } from './api.ts'
-import { checkAuth, refreshConfig, stableEntryUrl, STABLE_ENTRY_PATH, startRestart, useRestartState } from './state.ts'
+import {
+  checkAuth,
+  decidePending,
+  loadApproval,
+  refreshConfig,
+  stableEntryUrl,
+  STABLE_ENTRY_PATH,
+  startRestart,
+  useRestartState,
+} from './state.ts'
 
 /** Module-level API client (stateless; the component closes over it). */
 const api = new RestartApi()
@@ -141,6 +151,16 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: '11px',
     opacity: 0.85,
   },
+  approvalCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    padding: '11px 13px',
+    borderRadius: '9px',
+    border: '1px solid ' + DANGER,
+    background: 'rgba(192,57,43,0.07)',
+  },
+  approvalTitle: { fontWeight: 700, fontSize: '13px', color: DANGER, margin: 0 },
 }
 
 /** Human duration from milliseconds. */
@@ -187,6 +207,83 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+/** Remaining lifetime of a request, as mm:ss. */
+function remaining(expiresAt: string, now: number): string {
+  const deadline = Date.parse(expiresAt)
+  if (!Number.isFinite(deadline)) return '—'
+  const total = Math.max(0, Math.floor((deadline - now) / 1000))
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+
+/**
+ * The approval card: an agent asked for a restart, and only a click here makes
+ * it happen.
+ *
+ * Deliberately the loudest thing in the panel. A request nobody notices simply
+ * expires, so it has to be visible; approving one kills the current turn and the
+ * page's connection, so the destructive button says what it does instead of
+ * being an icon, and the safe one is right beside it.
+ */
+function ApprovalCard(props: {
+  approval: PendingApproval
+  busy: boolean
+  onDecide: (decision: 'approve' | 'deny') => void
+}) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [])
+  const { approval, busy, onDecide } = props
+  return (
+    <div style={s.approvalCard}>
+      <div style={s.row}>
+        <h4 style={s.approvalTitle}>有一个会话请求重启 DSH（尚未执行）</h4>
+        <span style={{ marginLeft: 'auto' }} />
+        <span style={s.badge}>{remaining(approval.expiresAt, now)} 后失效</span>
+      </div>
+      <div style={s.grid}>
+        <span style={s.label}>原因</span>
+        <span style={s.value}>{approval.reason === '' ? '（未填写）' : approval.reason}</span>
+        {typeof approval.origin === 'string' && approval.origin !== '' ? (
+          <>
+            <span style={s.label}>发起方</span>
+            <span style={s.value}>{approval.origin}</span>
+          </>
+        ) : null}
+        <span style={s.label}>提交于</span>
+        <span style={s.value}>{localTime(approval.at)}</span>
+        <span style={s.label}>请求方声明</span>
+        <span style={s.value}>
+          {approval.claimedConsent ? '自称已获你同意（仅声明，不构成许可）' : '未声明已获同意'}
+        </span>
+      </div>
+      <div style={s.muted}>
+        在你点下面任何一个按钮之前，宿主不会有任何动作；超时未处理，请求自动作废。
+        「批准并重启」会立刻中断当前回合与页面连接（本页会自动重连）。
+      </div>
+      <div style={s.row}>
+        <button
+          type="button"
+          style={busy ? { ...s.danger, opacity: 0.6, cursor: 'default' } : s.danger}
+          disabled={busy}
+          onClick={() => onDecide('approve')}
+        >
+          {busy ? '处理中…' : '批准并重启'}
+        </button>
+        <button
+          type="button"
+          style={busy ? { ...s.button, opacity: 0.6, cursor: 'default' } : s.button}
+          disabled={busy}
+          onClick={() => onDecide('deny')}
+        >
+          拒绝，保持运行
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** One panel render. */
 export function RestartPanel(props: { variant?: 'settings' | 'floating'; onClose?: () => void }) {
   const variant = props.variant ?? 'settings'
@@ -213,6 +310,8 @@ export function RestartPanel(props: { variant?: 'settings' | 'floating'; onClose
       // Cheap HEAD /: catch an expired cookie while the panel is open, so the
       // fresh-token link appears before a reload lands on the 401 page.
       void checkAuth()
+      // An agent may have filed a request since the background poll last ran.
+      void loadApproval()
     } catch (caught) {
       setError(caught instanceof RestartApiError ? caught.message : String(caught))
       if (caught instanceof RestartApiError && caught.unauthorized) void checkAuth()
@@ -468,6 +567,20 @@ export function RestartPanel(props: { variant?: 'settings' | 'floating'; onClose
             </button>
           </div>
         </div>
+      ) : null}
+
+      {live.approval !== null ? (
+        <ApprovalCard
+          approval={live.approval}
+          busy={live.approvalBusy}
+          onDecide={(decision) => {
+            void decidePending(decision)
+          }}
+        />
+      ) : null}
+
+      {live.approval === null && live.approvalExpired ? (
+        <div style={s.muted}>上一个重启请求已过期（超时未确认），没有执行任何重启。</div>
       ) : null}
 
       <div style={s.grid}>

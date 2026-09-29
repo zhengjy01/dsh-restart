@@ -97,6 +97,50 @@ export interface RestartConfig {
   showOverlay: boolean
   probeIntervalMs: number
   historyLimit: number
+  /** Agent-requested restarts need the user's click in this panel. */
+  requireApproval: boolean
+  /** How long such a request stays actionable. */
+  approvalTtlMinutes: number
+  /** Post a desktop notification when a request is filed. */
+  notifyOnApproval: boolean
+}
+
+/** One restart request waiting for the user's decision. */
+export interface PendingApproval {
+  id: string
+  at: string
+  expiresAt: string
+  ttlMs: number
+  source: string
+  reason: string
+  /** The requester's own claim of consent — context, never permission. */
+  claimedConsent: boolean
+  pid: number
+  /** Who filed it (session / workspace), when known. */
+  origin?: string
+}
+
+/** GET /api/dsh-restart/approval. */
+export interface ApprovalPayload {
+  ok: boolean
+  approval: PendingApproval | null
+  /** True when the last request timed out without a decision. */
+  expired: boolean
+  file: string
+  requireApproval: boolean
+  ttlMinutes: number
+}
+
+/** POST /api/dsh-restart/approval — the user's decision. */
+export interface ApprovalDecisionAck extends Partial<RestartAck> {
+  ok: boolean
+  /** The user refused; nothing was restarted. */
+  denied?: boolean
+  /** The user approved and a restart was handed over. */
+  approved?: boolean
+  approval?: PendingApproval
+  error?: string
+  decidedAt?: string
 }
 
 /** GET /api/dsh-restart/status. */
@@ -116,6 +160,10 @@ export interface StatusPayload {
   authUrl?: string
   history: RestartRecord[]
   logFiles: { name: string; file: string; size: number; mtime: string }[]
+  /** An agent's restart request still waiting for the user's decision. */
+  approval?: PendingApproval | null
+  /** True when the last request timed out without a decision. */
+  approvalExpired?: boolean
 }
 
 /** GET /api/dsh-restart/logs. */
@@ -320,6 +368,35 @@ export class RestartApi {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason, source }),
+      },
+      10_000,
+    )
+  }
+
+  /**
+   * The restart request an agent filed and nobody has decided on yet.
+   *
+   * This is the gate's read side: the panel polls it so a request shows up in
+   * the UI within seconds of being filed, and keeps showing it until the user
+   * picks a side or it expires.
+   */
+  async approval(): Promise<ApprovalPayload> {
+    return request<ApprovalPayload>('/api/dsh-restart/approval', {}, 4_000)
+  }
+
+  /**
+   * The user's decision on that request.
+   *
+   * `approve` restarts the host (the request is consumed server-side first, so
+   * a duplicated click cannot restart twice); `deny` just drops it.
+   */
+  async decideApproval(id: string, decision: 'approve' | 'deny'): Promise<ApprovalDecisionAck> {
+    return request<ApprovalDecisionAck>(
+      '/api/dsh-restart/approval',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, decision }),
       },
       10_000,
     )

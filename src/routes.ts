@@ -7,7 +7,9 @@
  *   GET  /status          host + live helper + config, plus the last restarts
  *   GET  /probe           tiny liveness probe the page polls while reconnecting
  *   GET  /auth            this process's fresh token URL (stale-tab 401 recovery)
- *   POST /restart         hand the restart to the detached helper, then exit
+ *   POST /restart         a panel click: hand the restart to the detached helper, then exit
+ *   GET  /approval        the restart request an agent filed, waiting for the user
+ *   POST /approval        the user's decision (approve → restart, deny → drop it)
  *   GET  /logs            boot-log tail (and the lines that look like errors)
  *   GET  /history         one record per requested restart
  *   POST /config          patch / reset the plugin config
@@ -39,6 +41,12 @@ import {
   type HelperStatus,
   type HostInfo,
 } from './restart.ts'
+import {
+  createApproval,
+  decideApproval,
+  readApproval,
+  type PendingApproval,
+} from './approval.ts'
 
 /** Route paths. */
 export const RESTART_API = {
@@ -47,6 +55,7 @@ export const RESTART_API = {
   auth: '/api/dsh-restart/auth',
   goto: '/api/dsh-restart/goto',
   restart: '/api/dsh-restart/restart',
+  approval: '/api/dsh-restart/approval',
   logs: '/api/dsh-restart/logs',
   history: '/api/dsh-restart/history',
   config: '/api/dsh-restart/config',
@@ -154,6 +163,10 @@ export interface RestartStatusPayload {
   /** Restarts requested through this plugin, newest first. */
   history: unknown[]
   logFiles: unknown[]
+  /** An agent's restart request that is still waiting for the user's decision. */
+  approval: PendingApproval | null
+  /** True when the last request timed out without a decision. */
+  approvalExpired: boolean
   endpoints: typeof RESTART_API
 }
 
@@ -354,12 +367,13 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'GET')) return
         const { config, exists, file } = await loadConfig()
-        const [host, helper, history, logs, job] = await Promise.all([
+        const [host, helper, history, logs, job, approval] = await Promise.all([
           hostInfo(deps),
           helperState(config),
           readHistory(8),
           listLogs(8),
           config.restartMode === 'helper' ? Promise.resolve(null) : launchdInfo(),
+          readApproval(),
         ])
         const payload: RestartStatusPayload = {
           ok: true,
@@ -385,6 +399,8 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
                 },
           history,
           logFiles: logs,
+          approval: approval.approval,
+          approvalExpired: approval.expired,
           endpoints: RESTART_API,
         }
         writeJson(res, 200, payload)
@@ -396,7 +412,28 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'POST')) return
         const body = (await readJsonBody(req)) ?? {}
+        // This route is the panel's own button: a human click IS the consent, so
+        // it restarts right away. An agent must not borrow it — the tool path
+        // files an approval request instead (see `dsh_restart`), and a caller
+        // that declares itself an agent is sent there rather than obeyed.
+        if (body.agentIntent === true) {
+          writeJson(res, 403, {
+            ok: false,
+            error:
+              'agent 发起的重启不能走本路由：请调用 dsh_restart 工具（它只提交待批准请求），' +
+              '等用户在网页面板点「批准并重启」后才真正重启。',
+          })
+          return
+        }
         const { config } = await loadConfig()
+        // This route cannot tell a panel click from a curl: every route in this
+        // plugin is loopback-only and unauthenticated by design, and a caller
+        // with shell access can copy any header we could invent. So it does not
+        // pretend to. It records the caller's own `source` claim (default
+        // 'web') as history — useful for review, never a permission — and
+        // leaves the real gate where it can actually work: the tool no longer
+        // restarts anything by itself (see ./approval.ts), and the panel keeps
+        // showing an agent's request until the user decides on it.
         const source = typeof body.source === 'string' && body.source !== '' ? body.source : 'web'
         const reason = typeof body.reason === 'string' ? body.reason : ''
         const outcome = await requestRestart({
@@ -424,6 +461,92 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
           oldPid: process.pid,
         })
         // The reply is on the wire now; only then hand the host over.
+        void outcome.commit()
+      },
+    },
+    {
+      kind: 'exact' as const,
+      path: RESTART_API.approval,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method === 'GET' || req.method === 'HEAD') {
+          const [{ config }, current] = await Promise.all([loadConfig(), readApproval()])
+          writeJson(res, 200, {
+            ok: true,
+            approval: current.approval,
+            expired: current.expired,
+            file: current.file,
+            requireApproval: config.requireApproval,
+            ttlMinutes: config.approvalTtlMinutes,
+          })
+          return
+        }
+        if (req.method !== 'POST') {
+          writeJson(res, 405, { error: 'method not allowed: ' + String(req.method) })
+          return
+        }
+        const body = (await readJsonBody(req)) ?? {}
+        const id = typeof body.id === 'string' ? body.id : ''
+        const decision = body.decision === 'approve' ? 'approve' : body.decision === 'deny' ? 'deny' : ''
+        if (id === '' || decision === '') {
+          writeJson(res, 400, { ok: false, error: '需要 { id, decision: "approve" | "deny" }' })
+          return
+        }
+        // Consumes the request: a replay of the same click can never restart twice.
+        const verdict = await decideApproval(id, decision)
+        if (!verdict.ok || verdict.approval === undefined) {
+          writeJson(res, 409, { ok: false, error: verdict.error ?? '无法处理该请求' })
+          return
+        }
+        if (verdict.denied === true) {
+          writeJson(res, 200, {
+            ok: true,
+            denied: true,
+            approval: verdict.approval,
+            decidedAt: new Date().toISOString(),
+          })
+          return
+        }
+        const { config } = await loadConfig()
+        const reason = verdict.approval.reason === '' ? 'agent 请求（用户已批准）' : verdict.approval.reason
+        const outcome = await requestRestart({
+          config,
+          port: deps.port,
+          host: deps.host,
+          url: deps.url,
+          source: 'user-approved',
+          reason,
+        })
+        if (!outcome.ok) {
+          // Hand the request back rather than swallowing it: the user approved a
+          // restart that could not start, and should be able to try again.
+          await createApproval({
+            reason: verdict.approval.reason,
+            ttlMs: verdict.approval.ttlMs,
+            claimedConsent: verdict.approval.claimedConsent,
+            source: verdict.approval.source,
+            ...(verdict.approval.origin === undefined ? {} : { origin: verdict.approval.origin }),
+          }).catch(() => undefined)
+          writeJson(res, 500, { ok: false, approved: true, error: outcome.error, approval: verdict.approval })
+          return
+        }
+        writeJson(res, 202, {
+          ok: true,
+          approved: true,
+          approval: verdict.approval,
+          helperPid: outcome.helperPid,
+          logFile: outcome.logFile,
+          statusFile: outcome.statusFile,
+          fallbackPort: outcome.fallbackPort,
+          fallbackUrl: outcome.fallbackUrl,
+          exitInMs: outcome.exitInMs,
+          mode: outcome.mode,
+          restartingAt: new Date().toISOString(),
+          oldPid: process.pid,
+        })
         void outcome.commit()
       },
     },
