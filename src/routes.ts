@@ -24,6 +24,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import {
   configPath,
   loadConfig,
+  loadConfigSync,
   readHistory,
   resetConfig,
   saveConfig,
@@ -86,8 +87,55 @@ export interface RouteContext {
   authUrl?: () => string
 }
 
-/** Strict loopback fence for every route (the panel is same-origin only). */
-function isLoopbackRequest(request: IncomingMessage): boolean {
+/** Whether a hostname names the loopback authority (localhost, [::1], 127/8). */
+function isLoopbackHostname(hostname: string): boolean {
+  if (hostname === 'localhost' || hostname === '[::1]' || hostname === '::1') return true
+  const parts = hostname.split('.')
+  return (
+    parts.length === 4 &&
+    parts[0] === '127' &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+  )
+}
+
+/**
+ * Whether one request authority matches a configured `trustedOrigins` entry.
+ *
+ * Same shape as the host's own fence: an entry with an explicit port matches
+ * that exact authority, a port-less entry matches the hostname on any port.
+ * Both sides compare through WHATWG normalization, so case and a redundant
+ * `:80` never decide trust.
+ *
+ * @param hostUrl - the request's parsed Host header.
+ * @param trustedOrigins - canonical authorities from the plugin config.
+ */
+function isTrustedAuthority(hostUrl: URL, trustedOrigins: readonly string[]): boolean {
+  for (const entry of trustedOrigins) {
+    let entryUrl: URL
+    try {
+      entryUrl = new URL(`http://${entry}`)
+    } catch {
+      continue
+    }
+    const hasPort = /:\d+$/.test(entry)
+    if (hasPort ? entryUrl.host === hostUrl.host : entryUrl.hostname === hostUrl.hostname) return true
+  }
+  return false
+}
+
+/**
+ * Same-origin fence for every route (the panel is same-origin only).
+ *
+ * The socket address must be loopback: a request that arrived over another
+ * interface did not come from this machine. The Host header must then name
+ * either the loopback authority (the browser opened `127.0.0.1:<port>`) or an
+ * authority the deployment declared in `trustedOrigins` — the reverse-proxy
+ * case, where the edge terminates TLS on a real hostname and forwards to the
+ * loopback bind. The remaining checks are unchanged, so a declared authority
+ * admits exactly what a loopback Host already admitted: a same-origin request
+ * from this machine.
+ */
+function isLoopbackRequest(request: IncomingMessage, trustedOrigins: readonly string[] = []): boolean {
   const address = request.socket.remoteAddress
   if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false
   const host = request.headers.host
@@ -98,7 +146,7 @@ function isLoopbackRequest(request: IncomingMessage): boolean {
   } catch {
     return false
   }
-  if (hostUrl.hostname !== '127.0.0.1' && hostUrl.hostname !== 'localhost' && hostUrl.hostname !== '[::1]') {
+  if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedOrigins)) {
     return false
   }
   if (request.headers['sec-fetch-site'] === 'cross-site') return false
@@ -197,8 +245,28 @@ async function fetchHelperJson(url: string, timeoutMs = 2_000): Promise<HelperSt
 
 /** Build the route list for ctx.webServer.register. */
 export function makeRoutes(deps: RouteContext): WebRoute[] {
+  /**
+   * The authorities this deployment declared, read per request.
+   *
+   * The panel's own settings surface writes this file, so a change takes effect
+   * on the next request without a host restart — the same reason every other
+   * setting is read through `loadConfig()` rather than captured at mount.
+   * Config that cannot be read falls back to the defaults (no extra
+   * authorities), which is the pre-existing behaviour.
+   */
+  const trustedOrigins = (): readonly string[] => {
+    try {
+      return loadConfigSync().config.trustedOrigins
+    } catch {
+      return []
+    }
+  }
+
+  /** The same-origin fence, resolved against the live config. */
+  const allowed = (req: IncomingMessage): boolean => isLoopbackRequest(req, trustedOrigins())
+
   const guard = (req: IncomingMessage, res: ServerResponse, method: string): boolean => {
-    if (!isLoopbackRequest(req)) {
+    if (!allowed(req)) {
       writeJson(res, 403, { error: 'forbidden: loopback-only' })
       return false
     }
@@ -290,7 +358,7 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
       kind: 'exact' as const,
       path: RESTART_API.probe,
       handler: (req: IncomingMessage, res: ServerResponse) => {
-        if (!isLoopbackRequest(req)) {
+        if (!allowed(req)) {
           writeJson(res, 403, { error: 'forbidden: loopback-only' })
           return
         }
@@ -314,7 +382,7 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
         // Unauthenticated on purpose: the page that needs the fresh URL is
         // exactly the one whose cookie/token just went stale, so it must be
         // able to read this. Loopback-only + same-origin, like every route.
-        if (!isLoopbackRequest(req)) {
+        if (!allowed(req)) {
           writeJson(res, 403, { error: 'forbidden: loopback-only' })
           return
         }
@@ -340,7 +408,7 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
         // it, a tab whose cookie is gone can only be rescued by copying a token
         // URL out of the terminal — the one step a user should never have to do.
         // Unauthenticated + loopback-only, exactly like `/auth`.
-        if (!isLoopbackRequest(req)) {
+        if (!allowed(req)) {
           writeJson(res, 403, { error: 'forbidden: loopback-only' })
           return
         }
@@ -468,7 +536,7 @@ export function makeRoutes(deps: RouteContext): WebRoute[] {
       kind: 'exact' as const,
       path: RESTART_API.approval,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
-        if (!isLoopbackRequest(req)) {
+        if (!allowed(req)) {
           writeJson(res, 403, { error: 'forbidden: loopback-only' })
           return
         }

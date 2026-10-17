@@ -103,6 +103,11 @@ export interface RestartConfig {
   approvalTtlMinutes: number
   /** Post a desktop notification when a request is filed. */
   notifyOnApproval: boolean
+  /**
+   * Non-loopback authorities this deployment is served under (bare
+   * `host[:port]`), so the routes admit a reverse-proxied browser.
+   */
+  trustedOrigins: string[]
 }
 
 /** One restart request waiting for the user's decision. */

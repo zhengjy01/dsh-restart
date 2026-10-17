@@ -2,6 +2,16 @@
 
 English | [中文](README.zh.md)
 
+> **This is a fork.** An internal mirror of
+> [`zhengjy01/dsh-restart`](https://github.com/zhengjy01/dsh-restart) with one
+> addition: a `trustedOrigins` config field so the panel works in a
+> **reverse-proxy deployment on a real hostname** (upstream's pinned `Host`
+> check answers 403 to every request in that shape — see
+> [upstream#1](https://github.com/zhengjy01/dsh-restart/issues/1)).
+> Identical to upstream apart from that field; switch back once it is merged.
+> Install from this repository.
+
+
 A restart button for DeepSeek Harness. Installing or updating a plugin changes
 host-side code, and only a fresh `dsh web` process picks it up — that used to
 mean going back to a terminal. Now it is one click in the Web GUI: the page
@@ -204,11 +214,41 @@ editable from the panel):
 | `showOverlay` | `true` | Show the full-screen overlay while restarting |
 | `probeIntervalMs` | `1200` | Reconnect probe interval |
 | `historyLimit` | `30` | Restart records kept |
+| `trustedOrigins` | `[]` | **Reverse-proxy deployments**: the authorities the browser actually uses (bare `host[:port]`, e.g. `dsh.example.com:7080`); listed authorities are admitted by the route fence |
+
+### Behind a reverse proxy (`trustedOrigins`)
+
+The routes are loopback-only by default (loopback socket **and** a loopback
+`Host` name), which is right when the browser opens `http://127.0.0.1:<port>`
+directly. If you front the host with a reverse proxy — TLS and login at the
+edge, the host still bound to loopback — the browser's `Host` is your real
+hostname, and every request is answered `403 forbidden: loopback-only` (the
+panel shows `读取中…`/`loading` forever and the restart button does nothing).
+
+List that authority in `trustedOrigins` (use the authority the browser sees —
+the same value you pass to the host CLI's `--trusted-host`):
+
+```json
+{ "trustedOrigins": ["dsh.example.com:7080"] }
+```
+
+An entry with a port matches that exact authority; a port-less entry matches the
+hostname on any port; a full origin (`https://dsh.example.com:7080`) is also
+accepted, with only the authority compared. Wildcards, paths, queries and
+credentials are ignored with a logged warning — never silently unmatched.
+
+Widening a fence costs something, so list only the authority you actually serve.
+The socket-address rule, the `sec-fetch-site: cross-site` refusal and the
+"present `Origin` must equal `Host`" rule are all unchanged; a listed authority
+therefore admits only what a loopback `Host` already admitted — a same-origin
+request from this machine. **Authentication is your deployment's job** (here an
+oauth2-proxy/OIDC gateway); this plugin adds none and removes none.
 
 ## HTTP surface
 
-All loopback-only (127.0.0.1 / ::1) and same-origin, matching the other `dsh-*`
-panels — everything below lives under `/api/dsh-restart/`:
+Loopback-only (127.0.0.1 / ::1) and same-origin by default, matching the other
+`dsh-*` panels; reverse-proxy deployments add declared authorities through
+`trustedOrigins`. Everything below lives under `/api/dsh-restart/`:
 
 | Method | Path | Meaning |
 | --- | --- | --- |
