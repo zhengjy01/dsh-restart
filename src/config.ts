@@ -81,6 +81,24 @@ export interface RestartConfig {
   approvalTtlMinutes: number
   /** Post a desktop notification when an agent files a restart request. */
   notifyOnApproval: boolean
+  /**
+   * Non-loopback authorities this host is served under, as bare `host[:port]`.
+   *
+   * The routes are loopback-only by design, which is right when the browser
+   * talks to `127.0.0.1:<port>` directly. A deployment that fronts the host
+   * with a reverse proxy (TLS + auth at the edge, host bound to loopback)
+   * sends a real hostname in `Host` instead, and the panel would answer 403 to
+   * every request. Listing that authority here admits exactly those requests;
+   * the socket-address rule, the cross-site check and the Origin/Host equality
+   * check are all unchanged, so a listed authority grants nothing a
+   * same-origin browser could not already do. Authentication is the
+   * deployment's own — this plugin adds none and removes none.
+   *
+   * Use the authority the browser sees (what `--trusted-host` names on the
+   * host CLI), e.g. `dsh.example.com:7080`. An entry without a port matches
+   * the hostname on any port.
+   */
+  trustedOrigins: string[]
 }
 
 /** Shipped defaults. */
@@ -105,6 +123,7 @@ export const DEFAULT_CONFIG: RestartConfig = {
   requireApproval: true,
   approvalTtlMinutes: 15,
   notifyOnApproval: true,
+  trustedOrigins: [],
 }
 
 /** One completed restart request, as rendered in the panel history list. */
@@ -182,6 +201,69 @@ function intIn(value: unknown, fallback: number, min: number, max: number): numb
   return Math.max(min, Math.min(max, Math.round(raw)))
 }
 
+/**
+ * Canonicalize one configured authority into the bare `host[:port]` the Host
+ * fence compares against.
+ *
+ * A wrong entry that silently never matches is the failure mode this plugin
+ * cannot afford: the operator would see the same 403 as before and conclude the
+ * setting does nothing. So anything that is not a bare authority — a path, a
+ * scheme, a wildcard, credentials, an unparsable value — is dropped with a
+ * warning rather than accepted and ignored.
+ *
+ * @param value - one entry from the `trustedOrigins` list.
+ * @returns the canonical authority, or null when the entry is unusable.
+ */
+function authorityIn(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const input = value.trim()
+  if (input === '') return null
+  if (input.includes('*')) {
+    console.warn(`[dsh-restart] trustedOrigins entry ignored (wildcards are not supported): ${input}`)
+    return null
+  }
+  // Accept a full origin (`https://host:port`) as a convenience, but store and
+  // compare only the authority: the fence sees a `Host` header, never a scheme.
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(input) ? input : `http://${input}`
+  let url: URL
+  try {
+    url = new URL(candidate)
+  } catch {
+    console.warn(`[dsh-restart] trustedOrigins entry ignored (not a valid authority): ${input}`)
+    return null
+  }
+  if (url.username !== '' || url.password !== '') {
+    console.warn(`[dsh-restart] trustedOrigins entry ignored (must not contain credentials): ${input}`)
+    return null
+  }
+  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') {
+    console.warn(`[dsh-restart] trustedOrigins entry ignored (must not contain a path, query or fragment): ${input}`)
+    return null
+  }
+  if (url.hostname === '') {
+    console.warn(`[dsh-restart] trustedOrigins entry ignored (missing host): ${input}`)
+    return null
+  }
+  return url.host
+}
+
+/**
+ * Normalize the `trustedOrigins` list: canonical authorities, de-duplicated,
+ * order preserved. A non-array value falls back to the base config's list.
+ */
+function trustedOriginsIn(value: unknown, base: string[]): string[] {
+  if (!Array.isArray(value)) return [...base]
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const entry of value) {
+    const authority = authorityIn(entry)
+    if (authority === null || seen.has(authority)) continue
+    seen.add(authority)
+    out.push(authority)
+  }
+  return out
+}
+
 /** Normalize a partial config against the defaults (never throws). */
 export function normalizeConfig(patch: Partial<RestartConfig> | undefined, base = DEFAULT_CONFIG): RestartConfig {
   const source = patch ?? {}
@@ -215,6 +297,7 @@ export function normalizeConfig(patch: Partial<RestartConfig> | undefined, base 
       120,
     ),
     notifyOnApproval: typeof source.notifyOnApproval === 'boolean' ? source.notifyOnApproval : base.notifyOnApproval,
+    trustedOrigins: trustedOriginsIn(source.trustedOrigins, base.trustedOrigins),
   }
 }
 

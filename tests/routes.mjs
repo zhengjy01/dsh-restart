@@ -105,6 +105,86 @@ check('...and never reaches the engine', !wrongMethod.text.includes('helperPid')
 const badMethod = await call(routes, RESTART_API.probe, { method: 'POST' })
 check('POST /probe is refused (405)', badMethod.status === 405, String(badMethod.status))
 
+console.log('trusted origins (reverse-proxy deployment)')
+
+// The fence reads the config file per request, so rewriting it is how the
+// panel's settings surface takes effect — no host restart involved.
+const PROXIED_HOST = 'dsh.example.com:7080'
+
+const beforeTrust = await call(routes, RESTART_API.probe, {
+  host: PROXIED_HOST,
+  origin: `http://${PROXIED_HOST}`,
+})
+check('a proxied Host is refused before it is declared', beforeTrust.status === 403, String(beforeTrust.status))
+
+await writeFile(path.join(HOME, 'config.json'), JSON.stringify({
+  fallbackPort: TEST_FALLBACK_PORT,
+  trustedOrigins: [PROXIED_HOST],
+}))
+
+const afterTrust = await call(routes, RESTART_API.probe, {
+  host: PROXIED_HOST,
+  origin: `http://${PROXIED_HOST}`,
+})
+check('a declared authority is admitted', afterTrust.status === 200, String(afterTrust.status))
+check('...for the status route too', (await call(routes, RESTART_API.status, {
+  host: PROXIED_HOST,
+  origin: `http://${PROXIED_HOST}`,
+})).status === 200)
+
+const untrustedSibling = await call(routes, RESTART_API.probe, {
+  host: 'other.example.com:7080',
+  origin: 'http://other.example.com:7080',
+})
+check('an undeclared authority on the same pattern is still refused', untrustedSibling.status === 403, String(untrustedSibling.status))
+
+const wrongPort = await call(routes, RESTART_API.probe, {
+  host: 'dsh.example.com:9999',
+  origin: 'http://dsh.example.com:9999',
+})
+check('a declared host on another port is refused', wrongPort.status === 403, String(wrongPort.status))
+
+const offBox = await call(routes, RESTART_API.probe, {
+  host: PROXIED_HOST,
+  origin: `http://${PROXIED_HOST}`,
+  remote: '10.0.0.5',
+})
+check('a declared authority does not admit an off-box socket', offBox.status === 403, String(offBox.status))
+
+const crossSiteTrusted = await call(routes, RESTART_API.probe, {
+  host: PROXIED_HOST,
+  origin: 'https://evil.example',
+})
+check('a declared authority does not admit a cross-site origin', crossSiteTrusted.status === 403, String(crossSiteTrusted.status))
+
+// A port-less entry matches the hostname on any port, like the host's own fence.
+await writeFile(path.join(HOME, 'config.json'), JSON.stringify({
+  fallbackPort: TEST_FALLBACK_PORT,
+  trustedOrigins: ['dsh.example.com'],
+}))
+check('a port-less entry matches any port', (await call(routes, RESTART_API.probe, {
+  host: 'dsh.example.com:9999',
+  origin: 'http://dsh.example.com:9999',
+})).status === 200)
+
+// Entries that could never match are dropped rather than silently accepted.
+await writeFile(path.join(HOME, 'config.json'), JSON.stringify({
+  fallbackPort: TEST_FALLBACK_PORT,
+  trustedOrigins: ['*', 'dsh.example.com/path', 'http://user:pw@dsh.example.com'],
+}))
+check('wildcard / path / credential entries are ignored', (await call(routes, RESTART_API.probe, {
+  host: 'dsh.example.com:7080',
+  origin: 'http://dsh.example.com:7080',
+})).status === 403)
+
+// Loopback behaviour is unaffected by the new field.
+check('loopback still works with trusted origins configured', (await call(routes, RESTART_API.probe, {
+  host: '127.0.0.1:3080',
+  origin: 'http://127.0.0.1:3080',
+})).status === 200)
+
+await writeFile(path.join(HOME, 'config.json'), JSON.stringify({ fallbackPort: TEST_FALLBACK_PORT }))
+
 console.log('probe + status')
 
 const probe = await call(routes, RESTART_API.probe)

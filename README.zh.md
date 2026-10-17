@@ -2,6 +2,13 @@
 
 [English](README.md) | 中文
 
+> **本仓库是 fork**：[`zhengjy01/dsh-restart`](https://github.com/zhengjy01/dsh-restart) 的内部镜像，
+> 仅加一个 `trustedOrigins` 配置，让本面板在**反向代理 + 自有域名**部署下可用
+> （上游对 `Host` 的钉死会让这类部署的每个请求回 403，见
+> [upstream#1](https://github.com/zhengjy01/dsh-restart/issues/1)）。
+> 除该配置外与原项目一致；上游合并后应切回上游。安装用本仓库地址。
+
+
 给 DeepSeek Harness 装一个「重启」按钮：装完/更新插件后不用再回终端敲命令，
 在 Web GUI 里点一下就把 DSH 重启了——页面自己重连、自己刷新；**如果新进程起不来，
 它会把报错直接显示出来**（页内遮罩 + 一个独立端口的恢复控制台）。
@@ -186,10 +193,25 @@
 | `showOverlay` | `true` | 重启时显示全屏遮罩 |
 | `probeIntervalMs` | `1200` | 重连探测间隔 |
 | `historyLimit` | `30` | 重启历史保留条数 |
+| `trustedOrigins` | `[]` | **反向代理部署**：浏览器实际访问的权威（裸 `host[:port]`，如 `dsh.example.com:7080`），列入后这些 `Host` 才被路由接纳 |
+
+### 反向代理部署（`trustedOrigins`）
+
+路由默认只认回环（socket 是回环 + `Host` 是回环名），这适用于浏览器直接打开 `http://127.0.0.1:<port>` 的情形。若你在前面架了反向代理（网关在边缘做 TLS 与登录，宿主仍只绑回环），浏览器发来的 `Host` 是真实域名，面板会对每个请求回 403 `forbidden: loopback-only`（宿主信息永远「读取中…」、点「立即重启」无效）。
+
+把该权威写进 `trustedOrigins` 即可（列表项用**浏览器看到的那个权威**，与宿主 CLI 的 `--trusted-host` 一致）：
+
+```json
+{ "trustedOrigins": ["dsh.example.com:7080"] }
+```
+
+带端口的条目精确匹配该权威；不带端口的条目匹配该主机名的任意端口；写完整 Origin（`https://dsh.example.com:7080`）亦可，只有权威参与比较。通配符、带路径/查询/凭据的条目会被忽略并在日志中告警——**不会静默不匹配**。
+
+放开一道栅栏就少一道，所以只列你确实在用的那个权威：socket 必须是回环、`sec-fetch-site: cross-site` 仍拒、`Origin` 存在时必须等于 `Host`，这三条不变；因此列入的权威只是把「同源、且来自本机」这一条件从回环 Host 扩展到你声明的 Host。**鉴权仍由你自己的部署承担**（本例是网关上的 oauth2-proxy/OIDC）——本插件不新增也不移除任何认证。
 
 ## HTTP 接口
 
-全部 loopback-only（127.0.0.1 / ::1，同源），沿用其它 dsh-* 面板的守卫：
+默认 loopback-only（127.0.0.1 / ::1，同源），沿用其它 dsh-* 面板的守卫；反向代理部署经 `trustedOrigins` 追加声明权威：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
